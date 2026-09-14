@@ -1,0 +1,63 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.venv/
+venv/
+
+# ROS / build artifacts
+build/
+install/
+log/
+dist/
+*.egg-info/
+
+# CMake / native build
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+
+# Runtime data
+*.db3
+*.bag
+*.pcd
+*.pcd.sc
+*.pgm
+*.pbstream
+*.pyc
+*.log
+tmp/
+temp/
+
+# Secrets / local configs
+**/config.json
+**/ptz_config.json
+**/.deploy.env
+**/.env
+**/.env.*
+**/secrets.*
+!packages/tron_ros2/.deploy.env.example
+
+# Third-party SDK payloads
+**/HCNetSDK/
+**/VolcEngineRTC/
+**/libhcnetsdk.so
+**/liblivox_lidar_sdk_shared.so

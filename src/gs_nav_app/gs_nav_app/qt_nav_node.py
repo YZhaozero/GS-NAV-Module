@@ -68,9 +68,13 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, Image
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
+
+try:
+    from livox_ros_driver2.msg import CustomMsg as LivoxCustomMsg
+except ImportError:  # The app can still monitor standard PointCloud2 sensors.
+    LivoxCustomMsg = None
 
 from .map_processing import (
     GridMap,
@@ -142,6 +146,14 @@ class CameraPanel(QWidget):
             self._camera_live = True
         self._route = route
         self._distance = remaining_m
+        self.update()
+
+    def clear_frame(self, camera_topic: Optional[str] = None) -> None:
+        if camera_topic is not None:
+            self._camera_topic = camera_topic
+        self._pixmap = None
+        self._route = None
+        self._camera_live = False
         self.update()
 
     def _video_rect(self) -> QRectF:
@@ -1521,6 +1533,8 @@ class QtNavRosNode(Node):
             self.get_parameter("camera_info_topic").value)
         self.map_topic = str(self.get_parameter("map_topic").value)
         self.path_topic = str(self.get_parameter("path_topic").value)
+        self.pointcloud_topic = str(
+            self.get_parameter("pointcloud_topic").value)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -1548,10 +1562,10 @@ class QtNavRosNode(Node):
             OccupancyGrid, self.map_topic, self._on_map, map_qos)
         self.create_subscription(
             Path, self.path_topic, self._on_path, reliable_qos)
-        pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
-        if pointcloud_topic:
+        if self.pointcloud_topic:
             self.create_subscription(
-                PointCloud2, pointcloud_topic, self._on_pointcloud, sensor_qos)
+                PointCloud2, self.pointcloud_topic,
+                self._on_pointcloud, sensor_qos)
         self.navigation_client = ActionClient(
             self, NavigateThroughPoses, "/navigate_through_poses")
 
@@ -1570,6 +1584,29 @@ class QtNavRosNode(Node):
         self.latest_pointcloud: Optional[np.ndarray] = None
         self.pointcloud_frame = self.map_frame
         self.pointcloud_revision = 0
+        self.sensor_preview_image: Optional[np.ndarray] = None
+        self.sensor_preview_cloud: Optional[np.ndarray] = None
+        self.sensor_preview_imu = None
+        self.sensor_preview_revisions = {
+            "camera": 0,
+            "lidar": 0,
+            "imu": 0,
+        }
+        self.sensor_preview_topics = {
+            "camera": "",
+            "lidar": "",
+            "imu": "",
+        }
+        self.sensor_preview_errors = {
+            "camera": "",
+            "lidar": "",
+            "imu": "",
+        }
+        self._sensor_preview_subscriptions = {
+            "camera": None,
+            "lidar": None,
+            "imu": None,
+        }
         self.navigation_status = "请在地图上添加至少一个途径点"
         self.navigation_active = False
         self.navigation_result_status: Optional[int] = None
@@ -1579,6 +1616,134 @@ class QtNavRosNode(Node):
             f"Qt navigation ready: camera={self.camera_topic}, "
             f"camera_info={self.camera_info_topic}, map={self.map_topic}, "
             f"path={self.path_topic}, action=/navigate_through_poses")
+
+    def available_sensor_topics(self):
+        """Return live ROS topics grouped by supported sensor message type."""
+        type_to_kind = {
+            "sensor_msgs/msg/PointCloud2": "lidar",
+            "livox_ros_driver2/msg/CustomMsg": "lidar",
+            "sensor_msgs/msg/Image": "camera",
+            "sensor_msgs/msg/Imu": "imu",
+        }
+        grouped = {"lidar": [], "camera": [], "imu": []}
+        for topic_name, topic_types in self.get_topic_names_and_types():
+            for topic_type in topic_types:
+                kind = type_to_kind.get(topic_type)
+                if kind is not None:
+                    grouped[kind].append(topic_name)
+                    break
+        for topics in grouped.values():
+            topics.sort()
+        return grouped
+
+    def start_sensor_preview(self, kind: str, topic: str):
+        """Create or replace one temporary sensor-monitor subscription."""
+        message_types = {
+            "lidar": PointCloud2,
+            "camera": Image,
+            "imu": Imu,
+        }
+        callbacks = {
+            "lidar": self._on_sensor_preview_cloud,
+            "camera": self._on_sensor_preview_image,
+            "imu": self._on_sensor_preview_imu,
+        }
+        if kind not in message_types:
+            return False, f"不支持的传感器类型：{kind}"
+        topic = str(topic).strip()
+        if not topic:
+            return False, "请选择或输入话题"
+        if kind == "lidar":
+            topic_types = []
+            try:
+                topic_types = dict(self.get_topic_names_and_types()).get(
+                    topic, [])
+            except RuntimeError:
+                pass
+            if "livox_ros_driver2/msg/CustomMsg" in topic_types:
+                if LivoxCustomMsg is None:
+                    return False, "当前环境缺少 livox_ros_driver2/CustomMsg"
+                message_types[kind] = LivoxCustomMsg
+                callbacks[kind] = self._on_sensor_preview_livox
+        self.stop_sensor_preview(kind)
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
+        )
+        try:
+            subscription = self.create_subscription(
+                message_types[kind], topic, callbacks[kind], qos)
+        except (RuntimeError, ValueError) as exc:
+            self.sensor_preview_errors[kind] = str(exc)
+            return False, f"订阅失败：{exc}"
+        self._sensor_preview_subscriptions[kind] = subscription
+        self.sensor_preview_topics[kind] = topic
+        self.sensor_preview_errors[kind] = ""
+        return True, f"正在订阅 {topic}"
+
+    def stop_sensor_preview(self, kind: Optional[str] = None) -> None:
+        """Destroy one or all temporary sensor-monitor subscriptions."""
+        kinds = tuple(self._sensor_preview_subscriptions) if kind is None else (kind,)
+        for sensor_kind in kinds:
+            subscription = self._sensor_preview_subscriptions.get(sensor_kind)
+            if subscription is not None:
+                self.destroy_subscription(subscription)
+                self._sensor_preview_subscriptions[sensor_kind] = None
+            if sensor_kind in self.sensor_preview_topics:
+                self.sensor_preview_topics[sensor_kind] = ""
+
+    def _on_sensor_preview_image(self, msg: Image) -> None:
+        try:
+            self.sensor_preview_image = image_to_bgr(msg)
+            self.sensor_preview_errors["camera"] = ""
+            self.sensor_preview_revisions["camera"] += 1
+        except (ValueError, TypeError) as exc:
+            self.sensor_preview_errors["camera"] = f"图像格式错误：{exc}"
+
+    def _on_sensor_preview_cloud(self, msg: PointCloud2) -> None:
+        try:
+            self.sensor_preview_cloud = pointcloud2_to_xyz(msg)
+            self.sensor_preview_errors["lidar"] = ""
+            self.sensor_preview_revisions["lidar"] += 1
+        except (ValueError, TypeError) as exc:
+            self.sensor_preview_errors["lidar"] = f"点云格式错误：{exc}"
+
+    def _on_sensor_preview_livox(self, msg) -> None:
+        try:
+            self.sensor_preview_cloud = np.asarray([
+                (point.x, point.y, point.z) for point in msg.points
+            ], dtype=np.float32).reshape(-1, 3)
+            self.sensor_preview_errors["lidar"] = ""
+            self.sensor_preview_revisions["lidar"] += 1
+        except (AttributeError, TypeError, ValueError) as exc:
+            self.sensor_preview_errors["lidar"] = (
+                f"Livox 点云格式错误：{exc}")
+
+    def _on_sensor_preview_imu(self, msg: Imu) -> None:
+        self.sensor_preview_imu = {
+            "frame_id": msg.header.frame_id,
+            "stamp": (msg.header.stamp.sec, msg.header.stamp.nanosec),
+            "orientation": (
+                msg.orientation.x, msg.orientation.y,
+                msg.orientation.z, msg.orientation.w,
+            ),
+            "angular_velocity": (
+                msg.angular_velocity.x, msg.angular_velocity.y,
+                msg.angular_velocity.z,
+            ),
+            "linear_acceleration": (
+                msg.linear_acceleration.x, msg.linear_acceleration.y,
+                msg.linear_acceleration.z,
+            ),
+            "orientation_covariance": tuple(msg.orientation_covariance),
+            "angular_velocity_covariance": tuple(
+                msg.angular_velocity_covariance),
+            "linear_acceleration_covariance": tuple(
+                msg.linear_acceleration_covariance),
+        }
+        self.sensor_preview_errors["imu"] = ""
+        self.sensor_preview_revisions["imu"] += 1
 
     def _on_image(self, msg: Image) -> None:
         try:
@@ -1940,6 +2105,12 @@ class NavigationWindow(QMainWindow):
         self.sensor_start_buttons = {}
         self.sensor_stop_buttons = {}
         self.sensor_log_views = {}
+        self.sensor_topic_combos = {}
+        self.sensor_preview_status_labels = {}
+        self.last_sensor_preview_revisions = dict(getattr(
+            node, "sensor_preview_revisions",
+            {"lidar": 0, "camera": 0, "imu": 0},
+        ))
         self.setWindowTitle("GS Navigation Console")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
@@ -2100,10 +2271,12 @@ class NavigationWindow(QMainWindow):
         )
         self.map_tools_page = self._build_map_tools_page()
         self.sensor_tools_page = self._build_sensor_tools_page()
+        self.sensor_monitor_page = self._build_sensor_monitor_page()
         self.pages = QStackedWidget()
         self.pages.addWidget(self.setup_page)
         self.pages.addWidget(self.map_tools_page)
         self.pages.addWidget(self.sensor_tools_page)
+        self.pages.addWidget(self.sensor_monitor_page)
         self.pages.addWidget(self.active_page)
         self.setCentralWidget(self.pages)
         self.setStyleSheet(self._style_sheet())
@@ -2125,6 +2298,10 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+        monitor_button = QPushButton("传感器数据")
+        monitor_button.setObjectName("primaryButton")
+        monitor_button.clicked.connect(self.show_sensor_monitor)
+        header.addWidget(monitor_button)
         back_button = QPushButton("返回导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.show_navigation_setup)
@@ -2185,6 +2362,129 @@ class NavigationWindow(QMainWindow):
                 lambda state, sensor=key: self._handle_sensor_state(sensor, state))
             self.sensor_processes[key] = controller
             self._handle_sensor_state(key, "stopped")
+        return root
+
+    def _build_sensor_monitor_page(self) -> QWidget:
+        """Build topic-selectable live views for lidar, camera, and IMU."""
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("GS SENSOR VIEW")
+        title.setObjectName("title")
+        subtitle = QLabel("ROS 2 话题选择 · 雷达点云 · 相机视频 · IMU 数据")
+        subtitle.setObjectName("subtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box)
+        header.addStretch(1)
+        refresh_button = QPushButton("刷新话题")
+        refresh_button.setObjectName("secondaryButton")
+        refresh_button.clicked.connect(self.refresh_sensor_topics)
+        header.addWidget(refresh_button)
+        back_button = QPushButton("返回传感器管理")
+        back_button.setObjectName("workspaceButton")
+        back_button.clicked.connect(self.leave_sensor_monitor)
+        header.addWidget(back_button)
+        layout.addLayout(header)
+
+        self.sensor_monitor_tabs = QTabWidget()
+        self.sensor_monitor_tabs.setObjectName("sensorMonitorTabs")
+        self.sensor_monitor_tabs.addTab(
+            self._build_lidar_monitor_tab(), "雷达点云")
+        self.sensor_monitor_tabs.addTab(
+            self._build_camera_monitor_tab(), "相机视频")
+        self.sensor_monitor_tabs.addTab(
+            self._build_imu_monitor_tab(), "IMU")
+        layout.addWidget(self.sensor_monitor_tabs, 1)
+        return root
+
+    def _sensor_topic_controls(self, kind: str, placeholder: str) -> QWidget:
+        root = QWidget()
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("话题")
+        label.setObjectName("sectionTitle")
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.lineEdit().setPlaceholderText(placeholder)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        start = QPushButton("开始显示")
+        start.setObjectName("primaryButton")
+        start.clicked.connect(
+            lambda: self._start_sensor_preview(kind))
+        stop = QPushButton("停止显示")
+        stop.setObjectName("dangerButton")
+        stop.clicked.connect(
+            lambda: self._stop_sensor_preview(kind))
+        layout.addWidget(label)
+        layout.addWidget(combo, 1)
+        layout.addWidget(stop)
+        layout.addWidget(start)
+        self.sensor_topic_combos[kind] = combo
+        return root
+
+    def _sensor_preview_status(self, kind: str, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("sensorPreviewStatus")
+        label.setWordWrap(True)
+        self.sensor_preview_status_labels[kind] = label
+        return label
+
+    def _build_lidar_monitor_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.addWidget(self._sensor_topic_controls(
+            "lidar", "选择 PointCloud2 或 Livox CustomMsg 话题"))
+        layout.addWidget(self._sensor_preview_status(
+            "lidar", "请选择 PointCloud2/Livox CustomMsg 话题并点击开始显示"))
+        self.sensor_preview_cloud_panel = MapPanel(cloud_3d=True)
+        self.sensor_preview_cloud_panel.setObjectName("sensorPreviewCloud")
+        self.sensor_preview_cloud_panel.set_display_mode("cloud")
+        layout.addWidget(self.sensor_preview_cloud_panel, 1)
+        hint = QLabel(
+            "左键拖动旋转 · 右键/中键平移 · 滚轮缩放 · 双击恢复视角")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+        return root
+
+    def _build_camera_monitor_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.addWidget(self._sensor_topic_controls(
+            "camera", "选择或输入 sensor_msgs/msg/Image 话题"))
+        layout.addWidget(self._sensor_preview_status(
+            "camera", "请选择 Image 话题并点击开始显示"))
+        self.sensor_preview_camera_panel = CameraPanel(
+            show_status=False,
+            camera_topic=str(getattr(
+                self.node, "camera_topic", "/color/image_raw")),
+        )
+        self.sensor_preview_camera_panel.setObjectName("sensorPreviewCamera")
+        layout.addWidget(self.sensor_preview_camera_panel, 1)
+        return root
+
+    def _build_imu_monitor_tab(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.addWidget(self._sensor_topic_controls(
+            "imu", "选择或输入 sensor_msgs/msg/Imu 话题"))
+        layout.addWidget(self._sensor_preview_status(
+            "imu", "请选择 Imu 话题并点击开始显示"))
+        self.sensor_preview_imu_text = QPlainTextEdit()
+        self.sensor_preview_imu_text.setObjectName("imuData")
+        self.sensor_preview_imu_text.setReadOnly(True)
+        self.sensor_preview_imu_text.setPlainText(
+            "等待 IMU 数据…\n\n"
+            "将显示姿态四元数、角速度、线加速度和协方差。")
+        layout.addWidget(self.sensor_preview_imu_text, 1)
         return root
 
     def _sensor_action_row(self, key: str, start_text: str) -> QWidget:
@@ -2637,7 +2937,8 @@ class NavigationWindow(QMainWindow):
         QWidget#card, QFrame#sidePanel {
             background: #101720; border: 1px solid #26323d; border-radius: 14px;
         }
-        QWidget#mapPanel, QWidget#mapEditorPanel {
+        QWidget#mapPanel, QWidget#mapEditorPanel,
+        QWidget#sensorPreviewCloud, QWidget#sensorPreviewCamera {
             border: 1px solid #293946; border-radius: 9px;
         }
         QWidget#mapEditorPanel { background: #0d141b; }
@@ -2660,6 +2961,10 @@ class NavigationWindow(QMainWindow):
         QLabel#mapStatus {
             color: #9fb2bf; background: #111b24; border-radius: 6px; padding: 6px;
             font-size: 11px;
+        }
+        QLabel#sensorPreviewStatus {
+            color: #8ed9f4; background: #0d1d27; border-radius: 7px;
+            padding: 8px; font-size: 12px;
         }
         QPushButton {
             min-height: 38px; border-radius: 7px; padding: 0 15px;
@@ -2703,6 +3008,12 @@ class NavigationWindow(QMainWindow):
         QPlainTextEdit#sensorLog {
             background: #080d12; color: #b9d9c5; border: none;
             font-family: Monospace; font-size: 12px; padding: 8px;
+            selection-background-color: #245b70;
+        }
+        QPlainTextEdit#imuData {
+            background: #080d12; color: #d4e6ec;
+            border: 1px solid #293946; border-radius: 9px;
+            font-family: Monospace; font-size: 15px; padding: 18px;
             selection-background-color: #245b70;
         }
         QListWidget#waypointList {
@@ -2758,6 +3069,166 @@ class NavigationWindow(QMainWindow):
     def show_sensor_tools(self) -> None:
         """Open the standalone sensor driver workspace."""
         self.pages.setCurrentWidget(self.sensor_tools_page)
+
+    def show_sensor_monitor(self) -> None:
+        """Open live sensor views and refresh compatible ROS topics."""
+        self.refresh_sensor_topics()
+        self.pages.setCurrentWidget(self.sensor_monitor_page)
+
+    def leave_sensor_monitor(self) -> None:
+        """Release preview-only subscriptions and return to driver control."""
+        if hasattr(self.node, "stop_sensor_preview"):
+            self.node.stop_sensor_preview()
+        for kind in ("lidar", "camera", "imu"):
+            self._clear_sensor_preview(kind)
+        self.pages.setCurrentWidget(self.sensor_tools_page)
+
+    def refresh_sensor_topics(self) -> None:
+        """Populate selectors from the ROS graph while preserving manual text."""
+        grouped = {"lidar": [], "camera": [], "imu": []}
+        if hasattr(self.node, "available_sensor_topics"):
+            try:
+                discovered = self.node.available_sensor_topics()
+                for kind in grouped:
+                    grouped[kind] = list(discovered.get(kind, ()))
+            except (RuntimeError, TypeError, ValueError) as exc:
+                for label in self.sensor_preview_status_labels.values():
+                    label.setText(f"读取 ROS 2 话题失败：{exc}")
+                return
+        configured = {
+            "camera": str(getattr(self.node, "camera_topic", "")),
+            "lidar": str(getattr(self.node, "pointcloud_topic", "")),
+            "imu": "",
+        }
+        active_topics = getattr(self.node, "sensor_preview_topics", {})
+        for kind, combo in self.sensor_topic_combos.items():
+            current = combo.currentText().strip()
+            candidates = list(grouped[kind])
+            for candidate in (configured[kind], active_topics.get(kind, ""), current):
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+            candidates.sort()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(candidates)
+            preferred = current or configured[kind]
+            if preferred:
+                combo.setCurrentText(preferred)
+            combo.blockSignals(False)
+            if candidates:
+                self.sensor_preview_status_labels[kind].setText(
+                    f"发现 {len(grouped[kind])} 个兼容话题，可选择后开始显示")
+            else:
+                self.sensor_preview_status_labels[kind].setText(
+                    "暂未发现兼容话题，也可以手动输入完整话题名称")
+
+    def _start_sensor_preview(self, kind: str) -> None:
+        combo = self.sensor_topic_combos[kind]
+        topic = combo.currentText().strip()
+        if not hasattr(self.node, "start_sensor_preview"):
+            self.sensor_preview_status_labels[kind].setText(
+                "当前 ROS 节点不支持动态传感器订阅")
+            return
+        self._clear_sensor_preview(kind, topic)
+        success, status = self.node.start_sensor_preview(kind, topic)
+        self.sensor_preview_status_labels[kind].setText(status)
+        revisions = getattr(self.node, "sensor_preview_revisions", {})
+        self.last_sensor_preview_revisions[kind] = int(
+            revisions.get(kind, 0))
+        if success:
+            tab_indexes = {"lidar": 0, "camera": 1, "imu": 2}
+            self.sensor_monitor_tabs.setCurrentIndex(tab_indexes[kind])
+
+    def _stop_sensor_preview(self, kind: str) -> None:
+        if hasattr(self.node, "stop_sensor_preview"):
+            self.node.stop_sensor_preview(kind)
+        self._clear_sensor_preview(kind)
+        self.sensor_preview_status_labels[kind].setText("已停止显示")
+
+    def _clear_sensor_preview(
+        self, kind: str, selected_topic: str = "",
+    ) -> None:
+        if kind == "lidar":
+            self.sensor_preview_cloud_panel.set_pointcloud(
+                np.empty((0, 3), dtype=np.float32))
+            self.sensor_preview_cloud_panel.set_display_mode("cloud")
+        elif kind == "camera":
+            topic = selected_topic or self.sensor_topic_combos[
+                "camera"].currentText().strip()
+            self.sensor_preview_camera_panel.clear_frame(topic or None)
+        else:
+            self.sensor_preview_imu_text.setPlainText("等待 IMU 数据…")
+
+    @staticmethod
+    def _format_imu_data(data) -> str:
+        stamp_sec, stamp_nanosec = data["stamp"]
+        orientation = data["orientation"]
+        angular = data["angular_velocity"]
+        linear = data["linear_acceleration"]
+
+        def vector(values) -> str:
+            return "  ".join(f"{value:+.6f}" for value in values)
+
+        def covariance(values) -> str:
+            rows = [values[index:index + 3] for index in range(0, 9, 3)]
+            return "\n".join(
+                "    " + "  ".join(f"{value:+.5e}" for value in row)
+                for row in rows)
+
+        return (
+            f"Frame ID       {data['frame_id'] or '(empty)'}\n"
+            f"Timestamp      {stamp_sec}.{stamp_nanosec:09d}\n\n"
+            "Orientation quaternion (x, y, z, w)\n"
+            f"  {vector(orientation)}\n\n"
+            "Angular velocity (rad/s)\n"
+            f"  x / y / z    {vector(angular)}\n\n"
+            "Linear acceleration (m/s²)\n"
+            f"  x / y / z    {vector(linear)}\n\n"
+            "Orientation covariance\n"
+            f"{covariance(data['orientation_covariance'])}\n\n"
+            "Angular velocity covariance\n"
+            f"{covariance(data['angular_velocity_covariance'])}\n\n"
+            "Linear acceleration covariance\n"
+            f"{covariance(data['linear_acceleration_covariance'])}"
+        )
+
+    def _refresh_sensor_previews(self) -> None:
+        if self.pages.currentWidget() is not self.sensor_monitor_page:
+            return
+        revisions = getattr(self.node, "sensor_preview_revisions", {})
+        errors = getattr(self.node, "sensor_preview_errors", {})
+        topics = getattr(self.node, "sensor_preview_topics", {})
+        for kind in ("lidar", "camera", "imu"):
+            error = errors.get(kind, "")
+            if error:
+                self.sensor_preview_status_labels[kind].setText(error)
+            revision = int(revisions.get(kind, 0))
+            if revision == self.last_sensor_preview_revisions.get(kind, 0):
+                continue
+            self.last_sensor_preview_revisions[kind] = revision
+            topic = topics.get(kind, "")
+            if kind == "lidar":
+                cloud = getattr(self.node, "sensor_preview_cloud", None)
+                if cloud is not None:
+                    self.sensor_preview_cloud_panel.set_pointcloud(cloud)
+                    self.sensor_preview_cloud_panel.set_display_mode("cloud")
+                    self.sensor_preview_status_labels[kind].setText(
+                        f"正在显示 {topic} · {len(cloud):,} 点")
+            elif kind == "camera":
+                image = getattr(self.node, "sensor_preview_image", None)
+                if image is not None:
+                    self.sensor_preview_camera_panel.set_frame(
+                        image, None, 0.0)
+                    height, width = image.shape[:2]
+                    self.sensor_preview_status_labels[kind].setText(
+                        f"正在显示 {topic} · {width}×{height}")
+            else:
+                data = getattr(self.node, "sensor_preview_imu", None)
+                if data is not None:
+                    self.sensor_preview_imu_text.setPlainText(
+                        self._format_imu_data(data))
+                    self.sensor_preview_status_labels[kind].setText(
+                        f"正在显示 {topic} · 已接收 {revision:,} 帧")
 
     def show_navigation_setup(self) -> None:
         """Return to navigation without starting or cancelling a task."""
@@ -3376,6 +3847,7 @@ class NavigationWindow(QMainWindow):
 
     def refresh(self) -> None:
         self._handle_navigation_terminal_state()
+        self._refresh_sensor_previews()
         image = self.node.latest_image
         route = None
         if image is not None:
@@ -3427,6 +3899,8 @@ class NavigationWindow(QMainWindow):
         self.navigation_return_timer.stop()
         for controller in self.sensor_processes.values():
             controller.shutdown()
+        if hasattr(self.node, "stop_sensor_preview"):
+            self.node.stop_sensor_preview()
         super().closeEvent(event)
 
 

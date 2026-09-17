@@ -382,6 +382,137 @@ def test_sensor_logs_are_split_and_process_state_updates_controls():
     assert window.sensor_log_views["lidar"].toPlainText() == ""
 
 
+def test_sensor_topic_discovery_filters_supported_message_types():
+    class FakeNode:
+        def get_topic_names_and_types(self):
+            return [
+                ("/points", ["sensor_msgs/msg/PointCloud2"]),
+                ("/livox/lidar", ["livox_ros_driver2/msg/CustomMsg"]),
+                ("/color/image_raw", ["sensor_msgs/msg/Image"]),
+                ("/imu/data", ["sensor_msgs/msg/Imu"]),
+                ("/scan", ["sensor_msgs/msg/LaserScan"]),
+            ]
+
+    grouped = QtNavRosNode.available_sensor_topics(FakeNode())
+    assert grouped == {
+        "lidar": ["/livox/lidar", "/points"],
+        "camera": ["/color/image_raw"],
+        "imu": ["/imu/data"],
+    }
+
+
+def test_livox_custom_message_is_converted_for_the_cloud_monitor():
+    class Point:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    class Message:
+        points = [Point(1.0, 2.0, 3.0), Point(-1.0, 0.5, 0.25)]
+
+    class FakeNode:
+        sensor_preview_cloud = None
+        sensor_preview_errors = {"lidar": "old error"}
+        sensor_preview_revisions = {"lidar": 4}
+
+    node = FakeNode()
+    QtNavRosNode._on_sensor_preview_livox(node, Message())
+    assert node.sensor_preview_cloud.shape == (2, 3)
+    assert np.allclose(node.sensor_preview_cloud[1], [-1.0, 0.5, 0.25])
+    assert node.sensor_preview_errors["lidar"] == ""
+    assert node.sensor_preview_revisions["lidar"] == 5
+
+
+def test_sensor_monitor_page_selects_topics_and_renders_live_data():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+        camera_topic = "/camera/camera/color/image_raw"
+        pointcloud_topic = ""
+
+        def __init__(self):
+            self.started = []
+            self.stopped = []
+            self.sensor_preview_revisions = {
+                "lidar": 0, "camera": 0, "imu": 0}
+            self.sensor_preview_topics = {
+                "lidar": "", "camera": "", "imu": ""}
+            self.sensor_preview_errors = {
+                "lidar": "", "camera": "", "imu": ""}
+            self.sensor_preview_cloud = None
+            self.sensor_preview_image = None
+            self.sensor_preview_imu = None
+
+        def available_sensor_topics(self):
+            return {
+                "lidar": ["/livox/lidar"],
+                "camera": ["/camera/camera/color/image_raw"],
+                "imu": ["/camera/camera/imu"],
+            }
+
+        def start_sensor_preview(self, kind, topic):
+            self.started.append((kind, topic))
+            self.sensor_preview_topics[kind] = topic
+            return True, f"正在订阅 {topic}"
+
+        def stop_sensor_preview(self, kind=None):
+            self.stopped.append(kind)
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    node = FakeNode()
+    window = NavigationWindow(node)
+    window.refresh_timer.stop()
+    window.show_sensor_tools()
+    window.show_sensor_monitor()
+    assert window.pages.currentWidget() is window.sensor_monitor_page
+    assert window.sensor_monitor_tabs.count() == 3
+    assert window.sensor_monitor_tabs.tabText(0) == "雷达点云"
+    assert window.sensor_monitor_tabs.tabText(1) == "相机视频"
+    assert window.sensor_monitor_tabs.tabText(2) == "IMU"
+    assert window.sensor_topic_combos["lidar"].findText(
+        "/livox/lidar") >= 0
+
+    window.sensor_topic_combos["lidar"].setCurrentText("/livox/lidar")
+    window._start_sensor_preview("lidar")
+    assert node.started[-1] == ("lidar", "/livox/lidar")
+    node.sensor_preview_cloud = np.array([
+        [0.0, 0.0, 0.0], [1.0, 2.0, 0.5],
+    ], dtype=np.float32)
+    node.sensor_preview_revisions["lidar"] += 1
+    window._refresh_sensor_previews()
+    assert len(window.sensor_preview_cloud_panel._cloud_source_points) == 2
+    assert "2 点" in window.sensor_preview_status_labels["lidar"].text()
+
+    window.sensor_topic_combos["imu"].setCurrentText("/camera/camera/imu")
+    window._start_sensor_preview("imu")
+    node.sensor_preview_imu = {
+        "frame_id": "camera_imu_optical_frame",
+        "stamp": (12, 345),
+        "orientation": (0.0, 0.0, 0.0, 1.0),
+        "angular_velocity": (0.1, 0.2, 0.3),
+        "linear_acceleration": (1.0, 2.0, 9.8),
+        "orientation_covariance": (0.0,) * 9,
+        "angular_velocity_covariance": (0.0,) * 9,
+        "linear_acceleration_covariance": (0.0,) * 9,
+    }
+    node.sensor_preview_revisions["imu"] += 1
+    window._refresh_sensor_previews()
+    imu_text = window.sensor_preview_imu_text.toPlainText()
+    assert "camera_imu_optical_frame" in imu_text
+    assert "Angular velocity" in imu_text
+    assert "Linear acceleration" in imu_text
+
+    window.leave_sensor_monitor()
+    assert node.stopped[-1] is None
+    assert window.pages.currentWidget() is window.sensor_tools_page
+
+
 def test_sensor_stop_terminates_the_complete_launch_process_group(
     tmp_path, monkeypatch,
 ):

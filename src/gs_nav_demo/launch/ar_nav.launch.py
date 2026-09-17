@@ -1,18 +1,30 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
 
 def generate_launch_description():
-    config = os.path.join(
-        get_package_share_directory("gs_nav_demo"), "config", "gs_nav.yaml")
+    package_share = get_package_share_directory("gs_nav_demo")
+    config = os.path.join(package_share, "config", "gs_nav.yaml")
+    default_pointcloud = os.path.join(
+        package_share, "maps", "dilo_map.pcd")
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "pointcloud_map_path",
+            default_value=default_pointcloud,
+            description="PCD/PLY loaded when the navigation UI starts; empty disables it",
+        ),
         Node(
             package="gs_nav_demo",
             executable="qt_nav_node",
             name="gs_qt_nav",
             output="screen",
-            parameters=[config],
+            parameters=[config, {
+                "pointcloud_map_path": LaunchConfiguration(
+                    "pointcloud_map_path"),
+            }],
         ),
     ])

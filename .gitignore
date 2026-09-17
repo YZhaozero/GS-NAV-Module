@@ -39,6 +39,7 @@ compile_commands.json
 *.db3
 *.bag
 *.pcd
+!src/gs_nav_demo/maps/dilo_map.pcd
 *.pcd.sc
 *.pgm
 *.pbstream

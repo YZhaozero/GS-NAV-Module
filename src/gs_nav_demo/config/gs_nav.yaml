@@ -11,7 +11,8 @@ gs_ar_nav:
     # 可选：订阅实时 PointCloud2 作为点云地图；留空时只使用本地 PCD/PLY。
     pointcloud_topic: ""
     # 程序启动时自动加载的 PCD/PLY；也可在界面中点击“加载 PCD/PLY”重新选择。
-    pointcloud_map_path: /home/zy/ws/car_simple_sim/src/car_localization/localizer/PCD/dilo_map.pcd
+    # ar_nav.launch.py 默认传入包内 maps/dilo_map.pcd；设为空可禁用启动时加载。
+    pointcloud_map_path: ""
 
     map_frame: map
     base_frame: base_link

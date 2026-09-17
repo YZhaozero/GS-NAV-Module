@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -87,10 +88,15 @@ def yaw_quaternion(yaw: float) -> Tuple[float, float]:
 class CameraPanel(QWidget):
     """Raw camera display with a resolution-independent Qt vector overlay."""
 
-    def __init__(self, show_status: bool = True) -> None:
+    def __init__(
+        self, show_status: bool = True, compact: bool = False,
+    ) -> None:
         super().__init__()
         self._show_status = show_status
-        self.setMinimumSize(640, 420)
+        if compact:
+            self.setMinimumSize(280, 160)
+        else:
+            self.setMinimumSize(640, 420)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._pixmap: Optional[QPixmap] = None
         self._source_size = (1280, 720)
@@ -220,6 +226,7 @@ class MapPanel(QWidget):
         self._cloud_colors = np.empty((0, 3), dtype=np.uint8)
         self._cloud_display_matrix = np.eye(3, dtype=np.float32)
         self._cloud_display_offset = np.zeros(3, dtype=np.float32)
+        self._cloud_ground_reference_z = 0.0
         self._cloud_alignment = "auto"
         self._cloud_axis_order = "XYZ"
         self._cloud_axis_flips = (False, False, False)
@@ -235,10 +242,12 @@ class MapPanel(QWidget):
         self._cloud_zoom = 1.0
         self._view_drag_button = Qt.NoButton
         self._last_mouse_position = None
+        self._view_drag_distance = 0.0
         self._path: Optional[np.ndarray] = None
         self._robot_xy: Optional[np.ndarray] = None
         self._robot_yaw = 0.0
         self._waypoints = []
+        self._selected_waypoint_index: Optional[int] = None
         self._edit_tool = "navigate"
         self._brush_radius = 0.20
         self._painting = False
@@ -501,6 +510,7 @@ class MapPanel(QWidget):
         rotation = np.eye(3, dtype=np.float32)
         offset = np.zeros(3, dtype=np.float32)
         self._cloud_level_angle_degrees = 0.0
+        self._cloud_ground_reference_z = 0.0
         if self._cloud_alignment == "auto" and len(mapped) >= 6:
             lower, upper = np.percentile(mapped, [1.0, 99.0], axis=0)
             robust = mapped[np.all((mapped >= lower) & (mapped <= upper), axis=1)]
@@ -516,6 +526,14 @@ class MapPanel(QWidget):
                 rotation = self._rotation_between(
                     normal, np.array([0.0, 0.0, 1.0]))
                 offset = level_center - rotation @ level_center
+                # The leveling rotation used to be preview-only and retained
+                # the source cloud's arbitrary Z offset.  Establish a stable
+                # floor reference as well, so UI height limits such as
+                # -0.20..1.50 m describe height above the leveled ground.
+                leveled_robust = robust @ rotation.T + offset
+                self._cloud_ground_reference_z = float(
+                    np.percentile(leveled_robust[:, 2], 2.0))
+                offset[2] -= self._cloud_ground_reference_z
 
         self._cloud_display_matrix = rotation @ axis_matrix
         self._cloud_display_offset = offset.astype(np.float32)
@@ -550,7 +568,7 @@ class MapPanel(QWidget):
 
     def cloud_display_description(self) -> str:
         alignment = (
-            f"自动找平 {self._cloud_level_angle_degrees:.1f}°"
+            f"自动找平 {self._cloud_level_angle_degrees:.1f}°/地面Z=0"
             if self._cloud_alignment == "auto" else "原始坐标")
         projection = "透视" if self._cloud_projection == "perspective" else "正交"
         if self._cloud_color_mode == "rgb" and self.cloud_has_rgb:
@@ -678,10 +696,14 @@ class MapPanel(QWidget):
         return radius_x, radius_y
 
     def _cloud3d_widget_to_world(self, point: QPointF) -> Optional[np.ndarray]:
-        """Pick an XY location on the horizontal plane through the view target."""
+        """Pick a map-frame XY location on the displayed cloud ground."""
         if not len(self._cloud_points):
             return None
-        right, up, _depth = self._cloud_view_basis()
+        right, up, depth_axis = self._cloud_view_basis()
+        ground_z = (
+            0.0 if self._cloud_alignment == "auto"
+            else float(self._cloud_bounds_low[2]))
+        relative_z = ground_z - float(self._cloud_view_target[2])
         if self._cloud_projection == "perspective":
             longest = max(float(np.linalg.norm(self._cloud_extent)), 0.1)
             camera_distance = longest * 1.25
@@ -690,18 +712,22 @@ class MapPanel(QWidget):
             normalized_x = (point.x() - self.width() * 0.5) / focal_length
             normalized_y = (self.height() * 0.5 - point.y()) / focal_length
             matrix = np.array([
-                right[:2] + normalized_x * _depth[:2],
-                up[:2] + normalized_y * _depth[:2],
+                right[:2] + normalized_x * depth_axis[:2],
+                up[:2] + normalized_y * depth_axis[:2],
             ])
             screen = np.array([
-                normalized_x * camera_distance,
-                normalized_y * camera_distance,
+                normalized_x * camera_distance
+                - (right[2] + normalized_x * depth_axis[2]) * relative_z,
+                normalized_y * camera_distance
+                - (up[2] + normalized_y * depth_axis[2]) * relative_z,
             ])
         else:
             scale = self._cloud_view_scale()
             screen = np.array([
-                (point.x() - self.width() * 0.5) / scale,
-                (self.height() * 0.5 - point.y()) / scale,
+                (point.x() - self.width() * 0.5) / scale
+                - right[2] * relative_z,
+                (self.height() * 0.5 - point.y()) / scale
+                - up[2] * relative_z,
             ])
             matrix = np.array([
                 [right[0], right[1]],
@@ -710,7 +736,17 @@ class MapPanel(QWidget):
         if abs(float(np.linalg.det(matrix))) < 1e-5:
             return None
         relative_xy = np.linalg.solve(matrix, screen)
-        return self._cloud_view_target[:2] + relative_xy
+        displayed = np.array([
+            self._cloud_view_target[0] + relative_xy[0],
+            self._cloud_view_target[1] + relative_xy[1],
+            ground_z,
+        ], dtype=np.float32)
+        # Display transforms are rigid axis/level rotations, so their inverse
+        # is the transpose.  Return the original map-frame XY used by Nav2.
+        source = (
+            displayed - self._cloud_display_offset
+        ) @ self._cloud_display_matrix
+        return source[:2]
 
     def _orbit_cloud_view(self, dx: float, dy: float) -> None:
         self._cloud_azimuth -= float(dx) * 0.008
@@ -746,6 +782,17 @@ class MapPanel(QWidget):
 
     def set_waypoints(self, waypoints) -> None:
         self._waypoints = [np.asarray(point).copy() for point in waypoints]
+        if (
+            self._selected_waypoint_index is not None
+            and self._selected_waypoint_index >= len(self._waypoints)
+        ):
+            self._selected_waypoint_index = None
+        self.update()
+
+    def set_waypoint_selection(self, index: Optional[int]) -> None:
+        self._selected_waypoint_index = (
+            int(index) if index is not None and 0 <= index < len(self._waypoints)
+            else None)
         self.update()
 
     def _view(self):
@@ -820,6 +867,7 @@ class MapPanel(QWidget):
             if is_orbit or is_pan:
                 self._view_drag_button = event.button()
                 self._last_mouse_position = event.pos()
+                self._view_drag_distance = 0.0
                 self.setCursor(Qt.ClosedHandCursor)
                 event.accept()
                 return
@@ -841,6 +889,10 @@ class MapPanel(QWidget):
         if self._view_drag_button != Qt.NoButton and self._last_mouse_position is not None:
             delta = event.pos() - self._last_mouse_position
             self._last_mouse_position = event.pos()
+            self._view_drag_distance += abs(delta.x()) + abs(delta.y())
+            if self._view_drag_distance <= 4.0:
+                event.accept()
+                return
             if self._view_drag_button == Qt.LeftButton:
                 self._orbit_cloud_view(delta.x(), delta.y())
             else:
@@ -858,9 +910,19 @@ class MapPanel(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == self._view_drag_button:
+            select_point = (
+                event.button() == Qt.LeftButton
+                and self._edit_tool == "navigate"
+                and self._view_drag_distance <= 4.0
+            )
             self._view_drag_button = Qt.NoButton
             self._last_mouse_position = None
+            self._view_drag_distance = 0.0
             self._update_cursor()
+            if select_point:
+                world = self.widget_to_world(event.localPos())
+                if world is not None:
+                    self.point_selected.emit(float(world[0]), float(world[1]))
             event.accept()
             return
         if event.button() == Qt.LeftButton:
@@ -906,7 +968,10 @@ class MapPanel(QWidget):
         self._draw_robot(painter)
         for index, waypoint in enumerate(self._waypoints):
             is_last = index == len(self._waypoints) - 1
-            color = QColor("#ff5f67") if is_last else QColor("#ffc857")
+            if index == self._selected_waypoint_index:
+                color = QColor("#4ed8ff")
+            else:
+                color = QColor("#ff5f67") if is_last else QColor("#ffc857")
             self._draw_marker(painter, waypoint, color, str(index + 1))
 
     def _paint_cloud_3d(self, painter: QPainter) -> None:
@@ -963,28 +1028,41 @@ class MapPanel(QWidget):
             self._draw_gaussian_splats(
                 painter, screen_x, screen_y, depth, projectable)
         self._draw_cloud_3d_reference(painter)
+        self._draw_cloud_3d_navigation(painter)
 
+        compact = width < 520 or height < 360
         painter.setPen(QColor("#c4d3dc"))
         painter.setFont(QFont("Sans Serif", 10, QFont.DemiBold))
         kind = "Gaussian Splat" if self._cloud_source_splat_scales is not None else "三维点云"
         painter.drawText(
             QRectF(18, 14, width - 36, 28),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"{kind} · 渲染 {len(self._cloud_points):,} / {self._cloud_total_points:,}",
+            (
+                f"{kind} · {len(self._cloud_points):,} 点"
+                if compact else
+                f"{kind} · 渲染 {len(self._cloud_points):,} / "
+                f"{self._cloud_total_points:,}"
+            ),
         )
-        painter.setPen(QColor("#71bed8"))
-        painter.setFont(QFont("Sans Serif", 9))
-        painter.drawText(
-            QRectF(18, 40, width - 36, 24),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            self.cloud_display_description(),
-        )
+        if not compact:
+            painter.setPen(QColor("#71bed8"))
+            painter.setFont(QFont("Sans Serif", 9))
+            painter.drawText(
+                QRectF(18, 40, width - 36, 24),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self.cloud_display_description(),
+            )
         painter.setPen(QColor("#91a5b2"))
         painter.setFont(QFont("Sans Serif", 9))
         painter.drawText(
             QRectF(18, height - 42, width - 36, 28),
             Qt.AlignLeft | Qt.AlignVCenter,
-            "左键拖动旋转  ·  右键/中键拖动平移  ·  滚轮缩放  ·  双击复位",
+            (
+                "拖动旋转 · 右键平移 · 滚轮缩放"
+                if compact else
+                "左键拖动旋转  ·  右键/中键拖动平移  ·  "
+                "滚轮缩放  ·  双击复位"
+            ),
         )
 
     def _draw_gaussian_splats(
@@ -1061,6 +1139,98 @@ class MapPanel(QWidget):
             painter.setPen(QPen(color, 2.2))
             painter.drawLine(QPointF(x[0], y[0]), QPointF(x[1], y[1]))
             painter.drawText(QPointF(x[1] + 4, y[1] - 3), label)
+
+    def _cloud_ground_points_from_xy(self, xy: np.ndarray) -> np.ndarray:
+        """Place map-frame XY coordinates on the leveled cloud ground."""
+        points_xy = np.asarray(xy, dtype=np.float32).reshape(-1, 2)
+        ground_z = (
+            0.0 if self._cloud_alignment == "auto"
+            else float(self._cloud_bounds_low[2]))
+        matrix = self._cloud_display_matrix
+        denominator = float(matrix[2, 2])
+        if abs(denominator) < 1e-6:
+            return np.column_stack((
+                points_xy,
+                np.full(len(points_xy), ground_z + 0.04, dtype=np.float32),
+            ))
+        source_z = (
+            ground_z - self._cloud_display_offset[2]
+            - points_xy[:, 0] * matrix[2, 0]
+            - points_xy[:, 1] * matrix[2, 1]
+        ) / denominator
+        source = np.column_stack((points_xy, source_z)).astype(np.float32)
+        displayed = self.transform_cloud_points(source)
+        displayed[:, 2] += 0.04
+        return displayed
+
+    def _draw_cloud_3d_navigation(self, painter: QPainter) -> None:
+        """Overlay the active global path and robot on the 3-D ground plane."""
+        if self._path is not None and len(self._path) >= 2:
+            path_points = self._cloud_ground_points_from_xy(self._path[:, :2])
+            screen_x, screen_y, _depth = self._project_cloud_points(path_points)
+            finite = np.isfinite(screen_x) & np.isfinite(screen_y)
+            valid_indices = np.flatnonzero(finite)
+            if len(valid_indices) >= 2:
+                path = QPainterPath(QPointF(
+                    float(screen_x[valid_indices[0]]),
+                    float(screen_y[valid_indices[0]]),
+                ))
+                for index in valid_indices[1:]:
+                    path.lineTo(QPointF(
+                        float(screen_x[index]), float(screen_y[index])))
+                painter.setPen(QPen(
+                    QColor("#00d5ff"), 3.2, Qt.SolidLine, Qt.RoundCap))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPath(path)
+
+        for index, waypoint in enumerate(self._waypoints):
+            point_3d = self._cloud_ground_points_from_xy(
+                np.asarray(waypoint, dtype=np.float32)[:2])
+            screen_x, screen_y, _depth = self._project_cloud_points(point_3d)
+            if not np.isfinite(screen_x[0]) or not np.isfinite(screen_y[0]):
+                continue
+            point = QPointF(float(screen_x[0]), float(screen_y[0]))
+            is_last = index == len(self._waypoints) - 1
+            if index == self._selected_waypoint_index:
+                color = QColor("#4ed8ff")
+            else:
+                color = QColor("#ff5f67") if is_last else QColor("#ffc857")
+            painter.setPen(QPen(QColor("#ffffff"), 1.8))
+            painter.setBrush(color)
+            painter.drawEllipse(point, 6, 6)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(point + QPointF(8, -7), str(index + 1))
+
+        if self._robot_xy is None:
+            return
+        direction = np.array([
+            math.cos(self._robot_yaw), math.sin(self._robot_yaw)],
+            dtype=np.float32)
+        robot_points = self._cloud_ground_points_from_xy(np.vstack((
+            self._robot_xy[:2], self._robot_xy[:2] + direction,
+        )))
+        screen_x, screen_y, _depth = self._project_cloud_points(robot_points)
+        if not np.all(np.isfinite(screen_x)) or not np.all(np.isfinite(screen_y)):
+            return
+        center = np.array([screen_x[0], screen_y[0]], dtype=float)
+        heading = np.array(
+            [screen_x[1] - screen_x[0], screen_y[1] - screen_y[0]],
+            dtype=float)
+        length = float(np.linalg.norm(heading))
+        if length < 1e-5:
+            heading = np.array([0.0, -1.0])
+        else:
+            heading /= length
+        side = np.array([-heading[1], heading[0]])
+        arrow = QPolygonF([
+            QPointF(*(center + heading * 10.0)),
+            QPointF(*(center - heading * 7.0 + side * 6.0)),
+            QPointF(*(center - heading * 4.0)),
+            QPointF(*(center - heading * 7.0 - side * 6.0)),
+        ])
+        painter.setPen(QPen(QColor("#073346"), 1.8))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawPolygon(arrow)
 
     def _draw_global_path(self, painter: QPainter) -> None:
         if self._path is None or len(self._path) < 2:
@@ -1192,6 +1362,8 @@ class QtNavRosNode(Node):
         self.pointcloud_revision = 0
         self.navigation_status = "请在地图上添加至少一个途径点"
         self.navigation_active = False
+        self.navigation_result_status: Optional[int] = None
+        self.navigation_result_revision = 0
         self.goal_handle = None
         self.get_logger().info(
             "Qt navigation ready: camera=/color/image_raw, map=/map, "
@@ -1336,6 +1508,7 @@ class QtNavRosNode(Node):
             return False
         self.clear_navigation_path()
         self.navigation_active = True
+        self.navigation_result_status = None
         goal_msg = NavigateThroughPoses.Goal()
         for index, waypoint in enumerate(waypoints):
             if index + 1 < len(waypoints):
@@ -1362,14 +1535,11 @@ class QtNavRosNode(Node):
         try:
             goal_handle = future.result()
         except Exception as exc:  # ROS future propagates transport errors here.
-            self.navigation_status = f"导航目标发送失败: {exc}"
-            self.navigation_active = False
-            self.clear_navigation_path()
+            self._set_navigation_terminal(
+                -1, f"导航目标发送失败: {exc}")
             return
         if not goal_handle.accepted:
-            self.navigation_status = "导航目标被 Nav2 拒绝"
-            self.navigation_active = False
-            self.clear_navigation_path()
+            self._set_navigation_terminal(-2, "导航目标被 Nav2 拒绝")
             return
         # The user may have exited while the asynchronous request was pending.
         if not self.navigation_active:
@@ -1388,16 +1558,27 @@ class QtNavRosNode(Node):
         self.navigation_status = f"导航中 · 剩余 {current} 个途径点"
 
     def _on_navigation_result(self, future) -> None:
-        status = future.result().status
+        try:
+            status = future.result().status
+        except Exception as exc:
+            self._set_navigation_terminal(-3, f"读取导航结果失败: {exc}")
+            return
         labels = {
             4: "导航成功",
             5: "导航已取消",
             6: "导航失败",
         }
-        self.navigation_status = labels.get(status, f"导航结束，状态码 {status}")
+        self._set_navigation_terminal(
+            status, labels.get(status, f"导航结束，状态码 {status}"))
+
+    def _set_navigation_terminal(self, status: int, text: str) -> None:
+        """Publish one terminal-state revision for the Qt page controller."""
+        self.navigation_status = text
         self.navigation_active = False
         self.clear_navigation_path()
         self.goal_handle = None
+        self.navigation_result_status = int(status)
+        self.navigation_result_revision += 1
 
     def cancel_navigation(self) -> None:
         self.navigation_active = False
@@ -1416,12 +1597,11 @@ class ActiveNavigationPage(QWidget):
     def __init__(self, exit_callback, mode_callback=None) -> None:
         super().__init__()
         self._mode_callback = mode_callback
-        self.camera_panel = CameraPanel(show_status=False)
+        self.camera_panel = CameraPanel(show_status=True)
         self.camera_panel.setParent(self)
-        self.map_panel = MapPanel()
+        self.map_panel = MapPanel(cloud_3d=True)
         self.map_panel.setObjectName("activeMap")
-        self.map_panel.setCursor(Qt.ArrowCursor)
-        self.map_panel.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.map_panel.set_edit_tool("navigate", 0.20)
         self.map_panel.setParent(self)
         self.grid_mode_button = QPushButton("栅格")
         self.grid_mode_button.setObjectName("mapModeButton")
@@ -1442,6 +1622,43 @@ class ActiveNavigationPage(QWidget):
         self.exit_button.setObjectName("exitNavigationButton")
         self.exit_button.clicked.connect(exit_callback)
         self.exit_button.setParent(self)
+        self.result_overlay = QLabel(self)
+        self.result_overlay.setObjectName("navigationResultOverlay")
+        self.result_overlay.setAlignment(Qt.AlignCenter)
+        self.result_overlay.setWordWrap(True)
+        self.result_overlay.hide()
+
+    def show_navigation_result(self, status: Optional[int], text: str) -> None:
+        if status == 4:
+            title = "✓ 已到达目的地"
+            detail = "导航任务完成，即将返回地图"
+            border = "#43d17d"
+            background = "rgba(10, 42, 27, 235)"
+        elif status == 5:
+            title = "导航已取消"
+            detail = "即将返回地图"
+            border = "#ffc857"
+            background = "rgba(49, 39, 13, 235)"
+        else:
+            title = "导航已结束"
+            detail = text
+            border = "#ff737b"
+            background = "rgba(50, 19, 24, 235)"
+        self.result_overlay.setText(f"{title}\n{detail}")
+        self.result_overlay.setStyleSheet(
+            "QLabel#navigationResultOverlay {"
+            f"background: {background}; border: 2px solid {border};"
+            "border-radius: 16px; color: #f5f8fa;"
+            "font-size: 18px; font-weight: 700; padding: 18px;"
+            "}")
+        self.result_overlay.show()
+        self.result_overlay.raise_()
+        self.exit_button.setText("立即返回地图")
+
+    def clear_navigation_result(self) -> None:
+        self.result_overlay.hide()
+        self.result_overlay.clear()
+        self.exit_button.setText("退出导航")
 
     def set_map_mode(self, mode: str, notify: bool = True) -> None:
         self.map_panel.set_display_mode(mode)
@@ -1467,10 +1684,20 @@ class ActiveNavigationPage(QWidget):
             button_w,
             button_h,
         )
+        overlay_w = min(500, max(320, self.width() - 80))
+        overlay_h = 126
+        self.result_overlay.setGeometry(
+            (self.width() - overlay_w) // 2,
+            max(74, int(self.height() * 0.18)),
+            overlay_w,
+            overlay_h,
+        )
         self.map_panel.raise_()
         self.grid_mode_button.raise_()
         self.cloud_mode_button.raise_()
         self.exit_button.raise_()
+        if not self.result_overlay.isHidden():
+            self.result_overlay.raise_()
 
 
 class NavigationWindow(QMainWindow):
@@ -1478,8 +1705,11 @@ class NavigationWindow(QMainWindow):
         super().__init__()
         self.node = node
         self.waypoints = []
+        self.waypoint_edit_index: Optional[int] = None
         self.last_map_revision = -1
         self.last_pointcloud_revision = -1
+        self.last_navigation_result_revision = int(
+            getattr(node, "navigation_result_revision", 0))
         self.local_grid: Optional[GridMap] = None
         self.local_cloud: Optional[PointCloudMap] = None
         self._grid_original: Optional[np.ndarray] = None
@@ -1495,6 +1725,12 @@ class NavigationWindow(QMainWindow):
         self.setMinimumSize(1100, 680)
         self._build_ui()
         self._load_configured_pointcloud()
+        self.pending_navigation_result_status: Optional[int] = None
+        self.navigation_return_timer = QTimer(self)
+        self.navigation_return_timer.setSingleShot(True)
+        self.navigation_return_timer.setInterval(2200)
+        self.navigation_return_timer.timeout.connect(
+            self._finish_navigation_return)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh)
         self.refresh_timer.start(33)
@@ -1527,15 +1763,11 @@ class NavigationWindow(QMainWindow):
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
-        self.camera_panel = CameraPanel()
-        self.camera_panel.setObjectName("card")
-        splitter.addWidget(self.camera_panel)
-
-        side = QFrame()
-        side.setObjectName("sidePanel")
-        side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(16, 16, 16, 16)
-        side_layout.setSpacing(12)
+        map_card = QFrame()
+        map_card.setObjectName("sidePanel")
+        map_layout = QVBoxLayout(map_card)
+        map_layout.setContentsMargins(16, 16, 16, 16)
+        map_layout.setSpacing(10)
         map_header = QHBoxLayout()
         map_title = QLabel("导航地图")
         map_title.setObjectName("sectionTitle")
@@ -1558,20 +1790,59 @@ class NavigationWindow(QMainWindow):
             lambda: self.set_navigation_map_mode("cloud"))
         map_header.addWidget(self.grid_mode_button)
         map_header.addWidget(self.cloud_mode_button)
-        side_layout.addLayout(map_header)
-        self.map_panel = MapPanel()
+        map_layout.addLayout(map_header)
+        self.map_panel = MapPanel(cloud_3d=True)
         self.map_panel.setObjectName("mapPanel")
         self.map_panel.point_selected.connect(self.on_map_point)
         self.map_panel.set_edit_tool("navigate", 0.20)
-        side_layout.addWidget(self.map_panel, 1)
+        map_layout.addWidget(self.map_panel, 1)
 
-        hint = QLabel("在地图上依次点击途径点，机器人将从当前位置出发")
+        hint = QLabel(
+            "单击添加途径点；点云模式可左键拖动旋转、右键平移、滚轮缩放")
         hint.setObjectName("hint")
-        side_layout.addWidget(hint)
-        self.waypoint_label = QLabel("途径点：尚未添加")
-        self.waypoint_label.setWordWrap(True)
-        self.waypoint_label.setObjectName("coordinate")
-        side_layout.addWidget(self.waypoint_label)
+        map_layout.addWidget(hint)
+        splitter.addWidget(map_card)
+
+        side = QFrame()
+        side.setObjectName("sidePanel")
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(14, 14, 14, 14)
+        side_layout.setSpacing(10)
+        camera_title = QLabel("实时相机")
+        camera_title.setObjectName("sectionTitle")
+        side_layout.addWidget(camera_title)
+        self.camera_panel = CameraPanel(show_status=False, compact=True)
+        self.camera_panel.setObjectName("card")
+        self.camera_panel.setMinimumHeight(170)
+        self.camera_panel.setMaximumHeight(260)
+        side_layout.addWidget(self.camera_panel)
+
+        self.waypoint_title = QLabel("途径点（尚未添加）")
+        self.waypoint_title.setObjectName("sectionTitle")
+        side_layout.addWidget(self.waypoint_title)
+        self.waypoint_list = QListWidget()
+        self.waypoint_list.setObjectName("waypointList")
+        self.waypoint_list.setMinimumHeight(130)
+        self.waypoint_list.currentRowChanged.connect(
+            self._on_waypoint_selection_changed)
+        self.waypoint_list.itemDoubleClicked.connect(
+            self.begin_waypoint_reselection)
+        side_layout.addWidget(self.waypoint_list, 1)
+
+        waypoint_actions = QHBoxLayout()
+        self.edit_waypoint_button = QPushButton("重新选点")
+        self.edit_waypoint_button.setObjectName("secondaryButton")
+        self.edit_waypoint_button.setEnabled(False)
+        self.edit_waypoint_button.clicked.connect(
+            self.begin_waypoint_reselection)
+        self.delete_waypoint_button = QPushButton("删除选中点")
+        self.delete_waypoint_button.setObjectName("dangerButton")
+        self.delete_waypoint_button.setEnabled(False)
+        self.delete_waypoint_button.clicked.connect(
+            self.delete_selected_waypoint)
+        waypoint_actions.addWidget(self.edit_waypoint_button)
+        waypoint_actions.addWidget(self.delete_waypoint_button)
+        side_layout.addLayout(waypoint_actions)
 
         buttons = QHBoxLayout()
         self.clear_button = QPushButton("清空途径点")
@@ -1590,7 +1861,7 @@ class NavigationWindow(QMainWindow):
         side_layout.addWidget(self.nav_status)
 
         splitter.addWidget(side)
-        splitter.setSizes([1050, 420])
+        splitter.setSizes([1080, 380])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         layout.addWidget(splitter, 1)
@@ -1750,8 +2021,9 @@ class NavigationWindow(QMainWindow):
         convert_frame_row = QHBoxLayout()
         convert_frame_row.addWidget(QLabel("转换坐标"))
         self.convert_coordinates_combo = QComboBox()
+        self.convert_coordinates_combo.addItem(
+            "自动找平/当前显示坐标", "display")
         self.convert_coordinates_combo.addItem("原始 XYZ", "original")
-        self.convert_coordinates_combo.addItem("当前显示坐标（副本）", "display")
         convert_frame_row.addWidget(self.convert_coordinates_combo, 1)
         controls_layout.addLayout(convert_frame_row)
         resolution_row = QHBoxLayout()
@@ -1894,6 +2166,17 @@ class NavigationWindow(QMainWindow):
             min-height: 30px; background: #17222c; border: 1px solid #344652;
             border-radius: 5px; padding: 0 6px; color: #dbe4e9;
         }
+        QListWidget#waypointList {
+            background: #111b24; border: 1px solid #2d3e4a;
+            border-radius: 7px; padding: 5px; color: #dbe4e9;
+            outline: none;
+        }
+        QListWidget#waypointList::item {
+            min-height: 34px; border-radius: 5px; padding: 2px 8px;
+        }
+        QListWidget#waypointList::item:selected {
+            background: #174a60; color: #ffffff;
+        }
         QCheckBox { color: #dbe4e9; spacing: 4px; }
         QCheckBox::indicator {
             width: 15px; height: 15px; border: 1px solid #48606e;
@@ -1958,7 +2241,7 @@ class NavigationWindow(QMainWindow):
     def update_cloud_display_options(
         self, *_args, show_status: bool = True,
     ) -> None:
-        self.editor_map_panel.set_cloud_display_options(
+        display_options = dict(
             alignment=str(self.cloud_alignment_combo.currentData()),
             axis_order=str(self.cloud_axis_combo.currentData()),
             axis_flips=(
@@ -1969,6 +2252,22 @@ class NavigationWindow(QMainWindow):
             projection=str(self.cloud_projection_combo.currentData()),
             color_mode=str(self.cloud_color_combo.currentData()),
         )
+        self.editor_map_panel.set_cloud_display_options(**display_options)
+        self.map_panel.set_cloud_display_options(**display_options)
+        self.active_page.map_panel.set_cloud_display_options(**display_options)
+        display_transform_active = (
+            self.cloud_alignment_combo.currentData() == "auto"
+            or self.cloud_axis_combo.currentData() != "XYZ"
+            or self.cloud_flip_x.isChecked()
+            or self.cloud_flip_y.isChecked()
+            or self.cloud_flip_z.isChecked()
+        )
+        if display_transform_active:
+            # Keep grid generation in the same coordinate system the user is
+            # inspecting.  The original cloud remains untouched and can still
+            # be selected after returning to an untransformed display.
+            display_index = self.convert_coordinates_combo.findData("display")
+            self.convert_coordinates_combo.setCurrentIndex(display_index)
         if show_status and hasattr(self, "map_status"):
             suffix = ""
             if (
@@ -2156,7 +2455,17 @@ class NavigationWindow(QMainWindow):
             self.map_status.setText("请先加载 PCD/PLY 或配置 pointcloud_topic")
             return
         try:
-            use_display_coordinates = (
+            display_transform_active = (
+                self.cloud_alignment_combo.currentData() == "auto"
+                or self.cloud_axis_combo.currentData() != "XYZ"
+                or self.cloud_flip_x.isChecked()
+                or self.cloud_flip_y.isChecked()
+                or self.cloud_flip_z.isChecked()
+            )
+            if display_transform_active:
+                self.convert_coordinates_combo.setCurrentIndex(
+                    self.convert_coordinates_combo.findData("display"))
+            use_display_coordinates = display_transform_active or (
                 self.convert_coordinates_combo.currentData() == "display")
             conversion_points = (
                 self.editor_map_panel.transform_cloud_points(cloud.points)
@@ -2172,7 +2481,9 @@ class NavigationWindow(QMainWindow):
             self.node.grid_frame = grid.frame_id
             self.set_editor_map_mode("grid")
             h, w = grid.occupancy.shape
-            coordinates = "当前显示坐标副本" if use_display_coordinates else "原始 XYZ"
+            coordinates = (
+                "自动找平/当前显示坐标（地面 Z=0）"
+                if use_display_coordinates else "原始 XYZ")
             self.map_status.setText(
                 f"转换完成：{w}×{h}（使用{coordinates}），可继续编辑并保存 YAML/PGM")
         except ValueError as exc:
@@ -2383,36 +2694,145 @@ class NavigationWindow(QMainWindow):
         self.map_status.setText("已恢复到最近一次加载/保存的地图")
 
     def on_map_point(self, x: float, y: float) -> None:
-        self.waypoints.append(np.array([x, y], dtype=np.float32))
-        self._sync_selection_ui()
+        point = np.array([x, y], dtype=np.float32)
+        edit_index = self.waypoint_edit_index
+        if edit_index is not None and 0 <= edit_index < len(self.waypoints):
+            self.waypoints[edit_index] = point
+            self.waypoint_edit_index = None
+            self.waypoint_list.setEnabled(True)
+            self.node.navigation_status = f"已更新途径点 {edit_index + 1}"
+            self.nav_status.setText(self.node.navigation_status)
+            self._sync_selection_ui(edit_index)
+            return
+        self.waypoints.append(point)
+        self.node.navigation_status = f"已添加途径点 {len(self.waypoints)}"
+        self.nav_status.setText(self.node.navigation_status)
+        self._sync_selection_ui(len(self.waypoints) - 1)
 
     def clear_selection(self) -> None:
         self.waypoints = []
+        self.waypoint_edit_index = None
+        self.waypoint_list.setEnabled(True)
         self._sync_selection_ui()
 
-    def _sync_selection_ui(self) -> None:
+    def _on_waypoint_selection_changed(self, row: int) -> None:
+        valid = 0 <= row < len(self.waypoints)
+        editing = self.waypoint_edit_index is not None
+        self.edit_waypoint_button.setEnabled(valid or editing)
+        self.edit_waypoint_button.setText(
+            "取消重新选点" if editing else "重新选点")
+        self.delete_waypoint_button.setEnabled(valid and not editing)
+        self.start_button.setEnabled(bool(self.waypoints) and not editing)
+        highlighted = self.waypoint_edit_index if editing else (row if valid else None)
+        self.map_panel.set_waypoint_selection(highlighted)
+
+    def begin_waypoint_reselection(self, *_args) -> None:
+        if self.waypoint_edit_index is not None:
+            previous = self.waypoint_edit_index
+            self.waypoint_edit_index = None
+            self.waypoint_list.setEnabled(True)
+            self.node.navigation_status = "已取消重新选点"
+            self.nav_status.setText(self.node.navigation_status)
+            self._sync_selection_ui(previous)
+            return
+        row = self.waypoint_list.currentRow()
+        if not 0 <= row < len(self.waypoints):
+            self.node.navigation_status = "请先在列表中选择一个途径点"
+            self.nav_status.setText(self.node.navigation_status)
+            return
+        self.waypoint_edit_index = row
+        self.waypoint_list.setEnabled(False)
+        self.node.navigation_status = (
+            f"正在修改途径点 {row + 1}：请在地图上短按新的位置")
+        self.nav_status.setText(self.node.navigation_status)
+        self._on_waypoint_selection_changed(row)
+
+    def delete_selected_waypoint(self) -> None:
+        row = self.waypoint_list.currentRow()
+        if not 0 <= row < len(self.waypoints):
+            self.node.navigation_status = "请先在列表中选择要删除的途径点"
+            self.nav_status.setText(self.node.navigation_status)
+            return
+        self.waypoints.pop(row)
+        self.waypoint_edit_index = None
+        self.waypoint_list.setEnabled(True)
+        self.node.navigation_status = f"已删除途径点 {row + 1}"
+        self.nav_status.setText(self.node.navigation_status)
+        next_row = min(row, len(self.waypoints) - 1)
+        self._sync_selection_ui(next_row)
+
+    def _sync_selection_ui(self, preferred_index: Optional[int] = None) -> None:
+        current_row = (
+            self.waypoint_list.currentRow()
+            if preferred_index is None else preferred_index)
+        self.waypoint_list.blockSignals(True)
+        self.waypoint_list.clear()
+        for index, point in enumerate(self.waypoints):
+            self.waypoint_list.addItem(
+                f"{index + 1}.   X {point[0]:.2f} m    Y {point[1]:.2f} m")
         if self.waypoints:
-            lines = [
-                f"{index + 1}. ({point[0]:.2f}, {point[1]:.2f})"
-                for index, point in enumerate(self.waypoints)
-            ]
-            self.waypoint_label.setText("途径点：\n" + "\n".join(lines))
+            current_row = int(np.clip(current_row, 0, len(self.waypoints) - 1))
+            self.waypoint_list.setCurrentRow(current_row)
         else:
-            self.waypoint_label.setText("途径点：尚未添加")
-        self.start_button.setEnabled(bool(self.waypoints))
+            current_row = -1
+        self.waypoint_list.blockSignals(False)
+        self.waypoint_title.setText(
+            f"途径点（{len(self.waypoints)}）"
+            if self.waypoints else "途径点（尚未添加）")
         self.map_panel.set_waypoints(self.waypoints)
+        self._on_waypoint_selection_changed(current_row)
 
     def start_navigation(self) -> None:
+        if self.waypoint_edit_index is not None:
+            self.node.navigation_status = "请先在地图上完成途径点重新选择"
+            self.nav_status.setText(self.node.navigation_status)
+            return
+        self.navigation_return_timer.stop()
+        self.pending_navigation_result_status = None
+        self.active_page.clear_navigation_result()
+        self.last_navigation_result_revision = int(
+            getattr(self.node, "navigation_result_revision", 0))
         if self.node.send_navigation_waypoints(self.waypoints):
             self.active_page.map_panel.set_waypoints([])
             self.pages.setCurrentWidget(self.active_page)
 
     def exit_navigation(self) -> None:
+        if self.pending_navigation_result_status is not None:
+            self.navigation_return_timer.stop()
+            self._finish_navigation_return()
+            return
         self.node.cancel_navigation()
+        self.active_page.clear_navigation_result()
         self.clear_selection()
         self.pages.setCurrentWidget(self.setup_page)
 
+    def _handle_navigation_terminal_state(self) -> None:
+        revision = int(getattr(
+            self.node, "navigation_result_revision",
+            self.last_navigation_result_revision))
+        if revision == self.last_navigation_result_revision:
+            return
+        self.last_navigation_result_revision = revision
+        if self.pages.currentWidget() is not self.active_page:
+            return
+        status = getattr(self.node, "navigation_result_status", None)
+        self.pending_navigation_result_status = status
+        self.active_page.show_navigation_result(
+            status, str(self.node.navigation_status))
+        self.navigation_return_timer.start()
+
+    def _finish_navigation_return(self) -> None:
+        status = self.pending_navigation_result_status
+        self.pending_navigation_result_status = None
+        self.clear_selection()
+        self.active_page.map_panel.set_navigation_state(None, None, 0.0)
+        self.active_page.clear_navigation_result()
+        self.pages.setCurrentWidget(self.setup_page)
+        if status == 4:
+            self.node.navigation_status = "导航成功，已自动返回地图"
+
     def refresh(self) -> None:
+        self._handle_navigation_terminal_state()
         image = self.node.latest_image
         route = None
         if image is not None:

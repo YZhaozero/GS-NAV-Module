@@ -9,13 +9,13 @@ from PyQt5.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PyQt5.QtGui import QMouseEvent  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
-from gs_nav_demo.qt_nav_node import (  # noqa: E402
+from gs_nav_app.qt_nav_node import (  # noqa: E402
     MapPanel,
     NavigationWindow,
     QtNavRosNode,
 )
-from gs_nav_demo.map_processing import GridMap, PointCloudMap  # noqa: E402
-from gs_nav_demo.map_processing import pointcloud_to_grid  # noqa: E402
+from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
+from gs_nav_app.map_processing import pointcloud_to_grid  # noqa: E402
 
 
 def test_map_click_coordinate_round_trip():

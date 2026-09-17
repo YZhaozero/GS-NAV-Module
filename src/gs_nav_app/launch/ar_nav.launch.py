@@ -7,7 +7,7 @@ import os
 
 
 def generate_launch_description():
-    package_share = get_package_share_directory("gs_nav_demo")
+    package_share = get_package_share_directory("gs_nav_app")
     config = os.path.join(package_share, "config", "gs_nav.yaml")
     default_pointcloud = os.path.join(
         package_share, "maps", "dilo_map.pcd")
@@ -18,7 +18,7 @@ def generate_launch_description():
             description="PCD/PLY loaded when the navigation UI starts; empty disables it",
         ),
         Node(
-            package="gs_nav_demo",
+            package="gs_nav_app",
             executable="qt_nav_node",
             name="gs_qt_nav",
             output="screen",

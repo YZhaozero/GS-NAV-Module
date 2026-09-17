@@ -3,7 +3,7 @@ from glob import glob
 from setuptools import find_packages, setup
 
 
-package_name = "gs_nav_demo"
+package_name = "gs_nav_app"
 
 setup(
     name=package_name,
@@ -20,13 +20,13 @@ setup(
     zip_safe=True,
     maintainer="zy",
     maintainer_email="2293086836@qq.com",
-    description="Camera augmented-reality navigation overlay demo for ROS 2.",
+    description="Camera augmented-reality navigation application for ROS 2.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "ar_nav_node = gs_nav_demo.ar_nav_node:main",
-            "qt_nav_node = gs_nav_demo.qt_nav_node:main",
+            "ar_nav_node = gs_nav_app.ar_nav_node:main",
+            "qt_nav_node = gs_nav_app.qt_nav_node:main",
         ],
     },
 )

@@ -617,7 +617,7 @@ def save_grid_map(path: str | Path, grid: GridMap) -> Tuple[Path, Path]:
     pixels[display >= 50] = 0
     height, width = pixels.shape
     with pgm_path.open("wb") as stream:
-        stream.write(f"P5\n# Created by gs_nav_demo\n{width} {height}\n255\n".encode("ascii"))
+        stream.write(f"P5\n# Created by gs_nav_app\n{width} {height}\n255\n".encode("ascii"))
         stream.write(pixels.tobytes())
     payload = {
         "image": pgm_path.name,

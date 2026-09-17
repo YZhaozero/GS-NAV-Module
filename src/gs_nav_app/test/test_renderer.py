@@ -1,6 +1,6 @@
 import numpy as np
 
-from gs_nav_demo.renderer import (
+from gs_nav_app.renderer import (
     RenderStyle,
     draw_route,
     make_ribbon,

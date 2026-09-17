@@ -1,4 +1,4 @@
-# GS AR Navigation Demo
+# GS AR Navigation App
 
 一个 ROS 2 Humble 交互式导航界面：
 
@@ -21,16 +21,16 @@
 ## 无硬件预览
 
 ```bash
-cd ~/ws/GS-NAV-demo
-colcon build --packages-select gs_nav_demo --symlink-install
+cd ~/ws/GS-NAV-Module
+colcon build --packages-select gs_nav_app --symlink-install
 source install/setup.bash
-ros2 launch gs_nav_demo demo.launch.py
+ros2 launch gs_nav_app demo.launch.py
 ```
 
 无桌面环境时关闭窗口，合成图仍会发布：
 
 ```bash
-ros2 launch gs_nav_demo demo.launch.py show_window:=false
+ros2 launch gs_nav_app demo.launch.py show_window:=false
 ```
 
 ## 接入小车
@@ -38,15 +38,15 @@ ros2 launch gs_nav_demo demo.launch.py show_window:=false
 先按实际话题修改 `config/gs_nav.yaml`，然后运行：
 
 ```bash
-ros2 launch gs_nav_demo ar_nav.launch.py
+ros2 launch gs_nav_app ar_nav.launch.py
 ```
 
 默认点云已随软件放在包内，不依赖原来的 `car_simple_sim` 路径。也可在启动时换成其他
 PCD/PLY，或传入空值取消自动加载：
 
 ```bash
-ros2 launch gs_nav_demo ar_nav.launch.py pointcloud_map_path:=/path/to/map.pcd
-ros2 launch gs_nav_demo ar_nav.launch.py pointcloud_map_path:=""
+ros2 launch gs_nav_app ar_nav.launch.py pointcloud_map_path:=/path/to/map.pcd
+ros2 launch gs_nav_app ar_nav.launch.py pointcloud_map_path:=""
 ```
 
 该命令会立即打开 Qt 导航控制台；相机尚未发布图像时显示等待页面，收到第一帧后自动
@@ -91,7 +91,7 @@ ros2 launch gs_nav_demo ar_nav.launch.py pointcloud_map_path:=""
 也可以直接通过 remap 临时接入，例如：
 
 ```bash
-ros2 run gs_nav_demo ar_nav_node --ros-args \
+ros2 run gs_nav_app ar_nav_node --ros-args \
   -p camera_topic:=/color/image_raw \
   -p camera_info_topic:=/color/camera_info \
   -p map_topic:=/map \

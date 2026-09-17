@@ -9,7 +9,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("show_window", default_value="true"),
         Node(
-            package="gs_nav_demo",
+            package="gs_nav_app",
             executable="ar_nav_node",
             name="gs_ar_nav",
             output="screen",

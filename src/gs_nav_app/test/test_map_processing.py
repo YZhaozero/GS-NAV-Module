@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gs_nav_demo.map_processing import (
+from gs_nav_app.map_processing import (
     GridMap,
     load_grid_map,
     load_pcd,

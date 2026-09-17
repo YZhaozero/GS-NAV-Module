@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>gs_nav_demo</name>
+  <name>gs_nav_app</name>
   <version>0.1.0</version>
-  <description>Camera augmented-reality navigation overlay demo.</description>
+  <description>Camera augmented-reality navigation application.</description>
   <maintainer email="2293086836@qq.com">zy</maintainer>
   <license>Apache-2.0</license>
 

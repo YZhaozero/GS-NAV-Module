@@ -22,31 +22,26 @@
 // SOFTWARE.
 //
 
-#ifndef LIVOX_ROS_DRIVER_PARSE_CFG_FILE_H_
-#define LIVOX_ROS_DRIVER_PARSE_CFG_FILE_H_
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
 
-#include "../comm/comm.h"
+#include <rclcpp/rclcpp.hpp>
 
-#include "rapidjson/document.h"
-#include "rapidjson/filereadstream.h"
-#include "rapidjson/stringbuffer.h"
+#include "driver_node.h"
 
-#include <string>
-#include <vector>
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+  {
+    auto node = std::make_shared<livox_ros::DriverNode>(rclcpp::NodeOptions{});
+    rclcpp::spin(node);
+  }
+  rclcpp::shutdown();
 
-namespace livox_ros {
-
-class ParseCfgFile {
- public:
-  explicit ParseCfgFile(const std::string& path);
-  ~ParseCfgFile() {}
-
-  bool ParseSummaryInfo(LidarSummaryInfo& lidar_summary_info);
-  
- private:
-  const std::string path_;
-};
-
-} // namespace livox_ros
-
-#endif // LIVOX_ROS_DRIVER_PARSE_CFG_FILE_H_
+  // Livox-SDK2 1.2.x embeds an older spdlog whose process-global destructor
+  // conflicts with the spdlog ABI loaded by ROS 2 Fast DDS. All driver, SDK,
+  // ROS and worker-thread cleanup has completed above; skip only static
+  // process teardown to avoid the third-party logger SIGBUS on normal exit.
+  std::fflush(nullptr);
+  std::_Exit(EXIT_SUCCESS);
+}

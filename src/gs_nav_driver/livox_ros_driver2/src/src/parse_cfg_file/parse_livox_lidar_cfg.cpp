@@ -82,16 +82,6 @@ bool LivoxLidarConfigParser::ParseUserConfigs(const rapidjson::Document &doc,
     } else {
       user_config.pattern_mode = static_cast<int8_t>(config["pattern_mode"].GetInt());
     }
-    if (!config.HasMember("blind_spot_set")) {
-      user_config.blind_spot_set = -1;
-    } else {
-      user_config.blind_spot_set = static_cast<int8_t>(config["blind_spot_set"].GetInt());
-    }
-    if (!config.HasMember("dual_emit_en")) {
-      user_config.dual_emit_en = -1;
-    } else {
-      user_config.dual_emit_en = static_cast<uint8_t>(config["dual_emit_en"].GetInt());
-    }
     if (!config.HasMember("extrinsic_parameter")) {
       memset(&user_config.extrinsic_param, 0, sizeof(user_config.extrinsic_param));
     } else {

@@ -37,6 +37,11 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
     std::cout << "lidar info change callback failed, client data is nullptr" << std::endl;
     return;
   }
+  if (info == nullptr ||
+      info->dev_type != LivoxLidarDeviceType::kLivoxLidarTypeMid360) {
+    std::cout << "ignore non-MID-360 lidar, handle: " << handle << std::endl;
+    return;
+  }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
 
   LidarDevice* lidar_device = GetLidarDevice(handle, client_data);
@@ -71,21 +76,6 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
                               LivoxLidarCallback::SetPatternModeCallback, lds_lidar);
         std::cout << "set scan pattern, handle: " << handle << ", scan pattern: "
                   << static_cast<int32_t>(config.pattern_mode) << std::endl;
-      }
-      if (config.blind_spot_set != -1) {
-        lidar_device->livox_config.set_bits |= kConfigBlindSpot;
-        SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
-                              LivoxLidarCallback::SetBlindSpotCallback, lds_lidar);
-
-        std::cout << "set blind spot, handle: " << handle << ", blind spot distance: "
-                  << config.blind_spot_set << std::endl;
-      }
-      if (config.dual_emit_en != -1) {
-        lidar_device->livox_config.set_bits |= kConfigDualEmit;
-        SetLivoxLidarDualEmit(handle, (config.dual_emit_en == 0 ? false : true),
-                              LivoxLidarCallback::SetDualEmitCallback, lds_lidar);
-        std::cout << "set dual emit mode, handle: " << handle << ", enable dual emit: "
-                  << static_cast<int32_t>(config.dual_emit_en) << std::endl;
       }
     } // free lock for set_bits
 
@@ -182,72 +172,6 @@ void LivoxLidarCallback::SetPatternModeCallback(livox_status status, uint32_t ha
               << ", try again..." << std::endl;
   } else {
     std::cout << "failed to set pattern mode, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
-  }
-  return;
-}
-
-void LivoxLidarCallback::SetBlindSpotCallback(livox_status status, uint32_t handle,
-                                              LivoxLidarAsyncControlResponse *response,
-                                              void *client_data) {
-  LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
-  if (lidar_device == nullptr) {
-    std::cout << "failed to set blind spot since no lidar device found, handle: "
-              << handle << std::endl;
-    return;
-  }
-  LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
-
-  if (status == kLivoxLidarStatusSuccess) {
-    std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
-    lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigBlindSpot));
-    if (!lidar_device->livox_config.set_bits) {
-      lidar_device->connect_state = kConnectStateSampling;
-    }
-    std::cout << "successfully set blind spot, handle: " << handle
-              << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
-  } else if (status == kLivoxLidarStatusTimeout) {
-    const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
-                           LivoxLidarCallback::SetBlindSpotCallback, client_data);
-    std::cout << "set blind spot timeout, handle: " << handle
-              << ", try again..." << std::endl;
-  } else {
-    std::cout << "failed to set blind spot, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
-  }
-  return;
-}
-
-void LivoxLidarCallback::SetDualEmitCallback(livox_status status, uint32_t handle,
-                                             LivoxLidarAsyncControlResponse *response,
-                                             void *client_data) {
-  LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
-  if (lidar_device == nullptr) {
-    std::cout << "failed to set dual emit mode since no lidar device found, handle: "
-              << handle << std::endl;
-    return;
-  }
-
-  LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
-  if (status == kLivoxLidarStatusSuccess) {
-    std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
-    lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigDualEmit));
-    if (!lidar_device->livox_config.set_bits) {
-      lidar_device->connect_state = kConnectStateSampling;
-    }
-    std::cout << "successfully set dual emit mode, handle: " << handle
-              << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
-  } else if (status == kLivoxLidarStatusTimeout) {
-    const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarDualEmit(handle, config.dual_emit_en,
-                          LivoxLidarCallback::SetDualEmitCallback, client_data);
-    std::cout << "set dual emit mode timeout, handle: " << handle
-              << ", try again..." << std::endl;
-  } else {
-    std::cout << "failed to set dual emit mode, handle: " << handle
               << ", return code: " << response->ret_code
               << ", error key: " << response->error_key << std::endl;
   }

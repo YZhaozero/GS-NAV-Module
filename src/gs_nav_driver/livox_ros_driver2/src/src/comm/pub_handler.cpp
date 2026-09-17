@@ -109,7 +109,7 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle,
                                                 LivoxLidarEthernetPacket *data,
                                                 void *client_data) {
   PubHandler *self = (PubHandler *)client_data;
-  if (!self) {
+  if (!self || dev_type != LivoxLidarDeviceType::kLivoxLidarTypeMid360) {
     return;
   }
 
@@ -156,13 +156,7 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle,
   packet.handle = handle;
   packet.lidar_type = LidarProtoType::kLivoxLidarType;
   packet.extrinsic_enable = false;
-  if (dev_type == LivoxLidarDeviceType::kLivoxLidarTypeIndustrialHAP) {
-    packet.line_num = kLineNumberHAP;
-  } else if (dev_type == LivoxLidarDeviceType::kLivoxLidarTypeMid360) {
-    packet.line_num = kLineNumberMid360;
-  } else {
-    packet.line_num = kLineNumberDefault;
-  }
+  packet.line_num = kLineNumberMid360;
   packet.data_type = data->data_type;
   packet.point_num = data->dot_num;
   packet.point_interval = data->time_interval * 100 / data->dot_num; // ns

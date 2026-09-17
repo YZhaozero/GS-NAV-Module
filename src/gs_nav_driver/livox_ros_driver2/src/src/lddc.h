@@ -34,18 +34,10 @@
 
 namespace livox_ros {
 
-/** Send pointcloud message Data to ros subscriber or save them in rosbag file
- */
-typedef enum {
-  kOutputToRos = 0,
-  kOutputToRosBagFile = 1,
-} DestinationOfMessageOutput;
-
 /** The message type of transfer */
 typedef enum {
   kPointCloud2Msg = 0,
   kLivoxCustomMsg = 1,
-  kPclPxyziMsg = 2,
   kLivoxImuMsg = 3,
   kAllMsg = 4,
 } TransferType;
@@ -59,28 +51,21 @@ using CustomMsg = livox_ros_driver2::msg::CustomMsg;
 using CustomPoint = livox_ros_driver2::msg::CustomPoint;
 using ImuMsg = sensor_msgs::msg::Imu;
 
-using PointCloud = pcl::PointCloud<pcl::PointXYZI>;
-
 class DriverNode;
 
 class Lddc final {
 public:
-  Lddc(int format, int multi_topic, int data_src, int output_type, double frq,
-       std::string &frame_id);
+  Lddc(int format, int multi_topic, std::string &frame_id);
   ~Lddc();
 
   int RegisterLds(Lds *lds);
   void DistributePointCloudData(void);
   void DistributeImuData(void);
-  void CreateBagFile(const std::string &file_name);
   void PrepareExit(void);
 
   uint8_t GetTransferFormat(void) { return transfer_format_; }
   uint8_t IsMultiTopic(void) { return use_multi_topic_; }
   void SetRosNode(livox_ros::DriverNode *node) { cur_node_ = node; }
-
-  // void SetRosPub(ros::Publisher *pub) { global_pub_ = pub; };  // NOT USED
-  void SetPublishFrq(uint32_t frq) { publish_frq_ = frq; }
 
 public:
   Lds *lds_;
@@ -92,8 +77,6 @@ private:
   void PublishPointcloud2(LidarDataQueue *queue, uint8_t index);
   void PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index);
   void PublishPointcloud2AndCustomMsg(LidarDataQueue *queue, uint8_t index);
-  void PublishPclMsg(LidarDataQueue *queue, uint8_t index);
-
   void PublishImuData(LidarImuDataQueue &imu_data_queue, const uint8_t index);
 
   void InitPointcloud2MsgHeader(PointCloud2 &cloud);
@@ -108,20 +91,8 @@ private:
   void FillPointsToCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg);
   void PublishCustomPointData(const CustomMsg &livox_msg, const uint8_t index);
 
-  void InitPclMsg(const StoragePacket &pkg, PointCloud &cloud,
-                  uint64_t &timestamp);
-  void FillPointsToPclMsg(const StoragePacket &pkg, PointCloud &pcl_msg);
-  void PublishPclData(const uint8_t index, const uint64_t timestamp,
-                      const PointCloud &cloud);
-
   void InitImuMsg(const ImuData &imu_data, ImuMsg &imu_msg,
                   uint64_t &timestamp);
-
-  void FillPointsToPclMsg(PointCloud &pcl_msg, LivoxPointXyzrtlt *src_point,
-                          uint32_t num);
-  void FillPointsToCustomMsg(CustomMsg &livox_msg, LivoxPointXyzrtlt *src_point,
-                             uint32_t num, uint32_t offset_time,
-                             uint32_t point_interval, uint32_t echo_num);
 
   PublisherPtr CreatePublisher(uint8_t msg_type, std::string &topic_name,
                                uint32_t queue_size);
@@ -133,10 +104,6 @@ private:
 private:
   uint8_t transfer_format_;
   uint8_t use_multi_topic_;
-  uint8_t data_src_;
-  uint8_t output_type_;
-  double publish_frq_;
-  uint32_t publish_period_ns_;
   std::string frame_id_;
 
   PublisherPtr private_pub_[kMaxSourceLidar];

@@ -46,7 +46,6 @@
 #include "comm/comm.h"
 #include "comm/pub_handler.h"
 
-#include "parse_cfg_file/parse_cfg_file.h"
 #include "parse_cfg_file/parse_livox_lidar_cfg.h"
 
 #include "call_back/lidar_common_callback.h"
@@ -64,15 +63,13 @@ LdsLidar *g_lds_ldiar = nullptr;
 
 /** Lds lidar function -------------------------------------------------------*/
 LdsLidar::LdsLidar(double publish_freq)
-    : Lds(publish_freq, kSourceRawLidar), auto_connect_mode_(true),
-      whitelist_count_(0), is_initialized_(false) {
-  memset(broadcast_code_whitelist_, 0, sizeof(broadcast_code_whitelist_));
+    : Lds(publish_freq), is_initialized_(false) {
   ResetLdsLidar();
 }
 
 LdsLidar::~LdsLidar() {}
 
-void LdsLidar::ResetLdsLidar(void) { ResetLds(kSourceRawLidar); }
+void LdsLidar::ResetLdsLidar(void) { ResetLds(); }
 
 bool LdsLidar::InitLdsLidar(const std::string &path_name) {
   if (is_initialized_) {
@@ -85,43 +82,12 @@ bool LdsLidar::InitLdsLidar(const std::string &path_name) {
   }
 
   path_ = path_name;
-  if (!InitLidars()) {
+  if (!InitLivoxLidar()) {
     return false;
   }
   SetLidarPubHandle();
-  if (!Start()) {
-    return false;
-  }
   is_initialized_ = true;
   return true;
-}
-
-bool LdsLidar::InitLidars() {
-  if (!ParseSummaryConfig()) {
-    return false;
-  }
-  std::cout << "config lidar type: "
-            << static_cast<int>(lidar_summary_info_.lidar_type) << std::endl;
-
-  if (lidar_summary_info_.lidar_type & kLivoxLidarType) {
-    if (!InitLivoxLidar()) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool LdsLidar::Start() {
-  if (lidar_summary_info_.lidar_type & kLivoxLidarType) {
-    if (!LivoxLidarStart()) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool LdsLidar::ParseSummaryConfig() {
-  return ParseCfgFile(path_).ParseSummaryInfo(lidar_summary_info_);
 }
 
 bool LdsLidar::InitLivoxLidar() {
@@ -192,18 +158,16 @@ void LdsLidar::SetLidarPubHandle() {
   pub_handler().SetPointCloudConfig(publish_freq);
 }
 
-bool LdsLidar::LivoxLidarStart() { return true; }
-
 int LdsLidar::DeInitLdsLidar(void) {
   if (!is_initialized_) {
     printf("LiDAR data source is not exit");
     return -1;
   }
 
-  if (lidar_summary_info_.lidar_type & kLivoxLidarType) {
-    LivoxLidarSdkUninit();
-    printf("Livox Lidar SDK Deinit completely!\n");
-  }
+  // Stop the observer and its processing thread before tearing down the SDK.
+  pub_handler().Uninit();
+  LivoxLidarSdkUninit();
+  printf("Livox MID-360 SDK Deinit completely!\n");
 
   return 0;
 }

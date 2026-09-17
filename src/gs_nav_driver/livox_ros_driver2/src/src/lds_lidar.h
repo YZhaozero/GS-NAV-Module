@@ -37,8 +37,6 @@
 #include "livox_lidar_api.h"
 #include "livox_lidar_def.h"
 
-#include "rapidjson/document.h"
-
 namespace livox_ros {
 
 class LdsLidar final : public Lds {
@@ -50,7 +48,6 @@ class LdsLidar final : public Lds {
   }
 
   bool InitLdsLidar(const std::string& path_name);
-  bool Start();
 
   int DeInitLdsLidar(void);
  private:
@@ -59,21 +56,11 @@ class LdsLidar final : public Lds {
   ~LdsLidar();
   LdsLidar &operator=(const LdsLidar &) = delete;
 
-  bool ParseSummaryConfig();
-
-  bool InitLidars();
-  bool InitLivoxLidar();    // for new SDK
-
-  bool LivoxLidarStart();
+  bool InitLivoxLidar();
 
   void ResetLdsLidar(void);
 
   void SetLidarPubHandle();
-
-	// auto connect mode
-	void EnableAutoConnectMode(void) { auto_connect_mode_ = true; }
-  void DisableAutoConnectMode(void) { auto_connect_mode_ = false; }
-  bool IsAutoConnectMode(void) { return auto_connect_mode_; }
 
   virtual void PrepareExit(void);
 
@@ -82,12 +69,7 @@ class LdsLidar final : public Lds {
 
  private:
   std::string path_;
-  LidarSummaryInfo lidar_summary_info_;
-
-  bool auto_connect_mode_;
-  uint32_t whitelist_count_;
   volatile bool is_initialized_;
-  char broadcast_code_whitelist_[kMaxLidarCount][kBroadcastCodeSize];
 };
 
 }  // namespace livox_ros

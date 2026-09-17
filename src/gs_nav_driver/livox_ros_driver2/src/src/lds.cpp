@@ -37,39 +37,32 @@ namespace livox_ros {
 CacheIndex Lds::cache_index_;
 
 /* Member function --------------------------------------------------------- */
-Lds::Lds(const double publish_freq, const uint8_t data_src)
+Lds::Lds(const double publish_freq)
     : lidar_count_(kMaxSourceLidar),
       pcd_semaphore_(0),
       imu_semaphore_(0),
       publish_freq_(publish_freq),
-      data_src_(data_src),
       request_exit_(false) {
-  ResetLds(data_src_);
+  ResetLds();
 }
 
 Lds::~Lds() {
   lidar_count_ = 0;
-  ResetLds(0);
+  ResetLds();
   printf("lds destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
 }
 
-void Lds::ResetLidar(LidarDevice *lidar, uint8_t data_src) {
-  //cache_index_.ResetIndex(lidar);
+void Lds::ResetLidar(LidarDevice *lidar) {
   DeInitQueue(&lidar->data);
   lidar->imu_data.Clear();
 
-  lidar->data_src = data_src;
   lidar->connect_state = kConnectStateOff;
 }
 
-void Lds::SetLidarDataSrc(LidarDevice *lidar, uint8_t data_src) {
-  lidar->data_src = data_src;
-}
-
-void Lds::ResetLds(uint8_t data_src) {
+void Lds::ResetLds() {
   lidar_count_ = kMaxSourceLidar;
   for (uint32_t i = 0; i < kMaxSourceLidar; i++) {
-    ResetLidar(&lidars_[i], data_src);
+    ResetLidar(&lidars_[i]);
   }
 }
 
@@ -119,29 +112,6 @@ void Lds::StorageImuData(ImuData* imu_data) {
     if (imu_semaphore_.GetCount() <= 0) {
       imu_semaphore_.Signal();
     }
-  }
-}
-
-void Lds::StorageLvxPointData(PointFrame* frame) {
-  if (frame == nullptr) {
-    return;
-  }
-
-  uint8_t lidar_number = frame->lidar_num;
-  for (uint i = 0; i < lidar_number; ++i) {
-    PointPacket& lidar_point = frame->lidar_point[i];
-
-    uint64_t base_time = frame->base_time[i];
-    uint8_t index = 0;
-    int8_t ret = cache_index_.LvxGetIndex(lidar_point.lidar_type, lidar_point.handle, index);
-    if (ret != 0) {
-      printf("Storage lvx point data failed, lidar type:%u, device num:%u.\n", lidar_point.lidar_type, lidar_point.handle);
-      continue;
-    }
-
-    lidars_[index].connect_state = kConnectStateSampling;
-
-    PushLidarData(&lidar_point, index, base_time);
   }
 }
 

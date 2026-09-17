@@ -49,12 +49,6 @@ class LivoxLidarCallback {
   static void SetPatternModeCallback(livox_status status, uint32_t handle,
                                      LivoxLidarAsyncControlResponse *response,
                                      void *client_data);
-  static void SetBlindSpotCallback(livox_status status, uint32_t handle,
-                                   LivoxLidarAsyncControlResponse *response,
-                                   void *client_data);
-  static void SetDualEmitCallback(livox_status status, uint32_t handle,
-                                  LivoxLidarAsyncControlResponse *response,
-                                  void *client_data);
   static void SetAttitudeCallback(livox_status status, uint32_t handle,
                                   LivoxLidarAsyncControlResponse *response,
                                   void *client_data);

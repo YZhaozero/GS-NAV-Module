@@ -68,8 +68,6 @@ const uint32_t kRatioOfMsToNs = 1000000; /**< 1ms  = 1000000ns */
 
 const int kPathStrMinSize = 4;   /**< Must more than 4 char */
 const int kPathStrMaxSize = 256; /**< Must less than 256 char */
-const int kBdCodeSize = 15;
-
 const uint32_t kPointXYZRSize = 16;
 const uint32_t kPointXYZRTRSize = 18;
 
@@ -78,15 +76,10 @@ const double PI = 3.14159265358979323846;
 constexpr uint32_t kMaxBufferSize = 0x8000;  // 32k bytes
 
 /** Device Line Number **/
-const uint8_t kLineNumberDefault = 1;
 const uint8_t kLineNumberMid360 = 4;
-const uint8_t kLineNumberHAP = 6;    
 
 // SDK related
 typedef enum {
-  kIndustryLidarType = 1,
-  kVehicleLidarType = 2,
-  kDirectLidarType = 4,
   kLivoxLidarType = 8
 } LidarProtoType;
 
@@ -106,33 +99,11 @@ typedef enum {
   kConnectStateSampling = 3,
 } LidarConnectState;
 
-/** Device data source type */
-typedef enum {
-  kSourceRawLidar = 0, /**< Data from raw lidar. */
-  kSourceRawHub = 1,   /**< Data from lidar hub. */
-  kSourceLvxFile,      /**< Data from parse lvx file. */
-  kSourceUndef,
-} LidarDataSourceType;
-
-typedef enum { kCoordinateCartesian = 0, kCoordinateSpherical } CoordinateType;
-
 typedef enum {
   kConfigDataType = 1 << 0,
   kConfigScanPattern = 1 << 1,
-  kConfigBlindSpot = 1 << 2,
-  kConfigDualEmit = 1 << 3,
   kConfigUnknown
 } LivoxLidarConfigCodeBit;
-
-typedef enum {
-  kNoneExtrinsicParameter,
-  kExtrinsicParameterFromLidar,
-  kExtrinsicParameterFromXml
-} ExtrinsicParameterType;
-
-typedef struct {
- uint8_t lidar_type {};
-} LidarSummaryInfo;
 
 /** 8bytes stamp to uint64_t stamp */
 typedef union {
@@ -235,35 +206,10 @@ typedef struct {
   ExtParameter param;
 } LidarExtParameter;
 
-/** Configuration in json config file for livox lidar */
-typedef struct {
-  char broadcast_code[16];
-  bool enable_connect;
-  bool enable_fan;
-  uint32_t return_mode;
-  uint32_t coordinate;
-  uint32_t imu_rate;
-  uint32_t extrinsic_parameter_source;
-  bool enable_high_sensitivity;
-} UserRawConfig;
-
-typedef struct {
-  bool enable_fan;
-  uint32_t return_mode;
-  uint32_t coordinate;              /**< 0 for CartesianCoordinate; others for SphericalCoordinate. */
-  uint32_t imu_rate;
-  uint32_t extrinsic_parameter_source;
-  bool enable_high_sensitivity;
-  volatile uint32_t set_bits;
-  volatile uint32_t get_bits;
-} UserConfig;
-
 typedef struct {
   uint32_t handle;
   int8_t pcl_data_type;
   int8_t pattern_mode;
-  int32_t blind_spot_set;
-  int8_t dual_emit_en;
   ExtParameter extrinsic_param;
   volatile uint32_t set_bits;
   volatile uint32_t get_bits;
@@ -277,7 +223,6 @@ typedef struct {
   //   uint8_t slot : 4; //slot for LivoxLidarType::kVehicleLidarType
   //   uint8_t handle : 4;  // handle for LivoxLidarType::kIndustryLidarType
   // };
-  uint8_t data_src;                  /**< From raw lidar or livox file. */
   volatile LidarConnectState connect_state;
   // DeviceInfo info;
 
@@ -287,9 +232,6 @@ typedef struct {
   uint32_t firmware_ver; /**< Firmware version of lidar  */
   UserLivoxLidarConfig livox_config;
 } LidarDevice;
-
-constexpr uint32_t kMaxProductType = 10;
-constexpr uint32_t kDeviceTypeLidarMid70 = 6;
 
 /***********************************/
 /* Global function for general use */

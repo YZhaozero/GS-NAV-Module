@@ -41,12 +41,9 @@
 namespace livox_ros {
 
 /** Lidar Data Distribute Control--------------------------------------------*/
-Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
-           double frq, std::string &frame_id)
+Lddc::Lddc(int format, int multi_topic, std::string &frame_id)
     : transfer_format_(format), use_multi_topic_(multi_topic),
-      data_src_(data_src), output_type_(output_type), publish_frq_(frq),
       frame_id_(frame_id) {
-  publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
 }
 
@@ -125,8 +122,6 @@ void Lddc::PollingLidarPointCloudData(uint8_t index, LidarDevice *lidar) {
     } else if (kLivoxCustomMsg == transfer_format_) {
       // PublishPointcloud2AndCustomMsg(p_queue, index);
       PublishCustomPointcloud(p_queue, index);
-    } else if (kPclPxyziMsg == transfer_format_) {
-      PublishPclMsg(p_queue, index);
     } else if (kAllMsg == transfer_format_) {
       PublishPointcloud2AndCustomMsg(p_queue, index);
     }
@@ -200,36 +195,6 @@ void Lddc::PublishPointcloud2AndCustomMsg(LidarDataQueue *queue,
     FillPointsToCustomMsg(livox_msg, pkg);
     PublishCustomPointData(livox_msg, index);
   }
-}
-
-/* for pcl::pxyzi */
-void Lddc::PublishPclMsg(LidarDataQueue *queue, uint8_t index) {
-#ifdef BUILDING_ROS2
-  static bool first_log = true;
-  if (first_log) {
-    std::cout
-        << "error: message type 'pcl::PointCloud' is NOT supported in ROS2, "
-        << "please modify the 'xfer_format' field in the launch file"
-        << std::endl;
-  }
-  first_log = false;
-  return;
-#endif
-  while (!QueueIsEmpty(queue)) {
-    StoragePacket pkg;
-    QueuePop(queue, &pkg);
-    if (pkg.points.empty()) {
-      printf("Publish point cloud failed, the pkg points is empty.\n");
-      continue;
-    }
-
-    PointCloud cloud;
-    uint64_t timestamp = 0;
-    InitPclMsg(pkg, cloud, timestamp);
-    FillPointsToPclMsg(pkg, cloud);
-    PublishPclData(index, timestamp, cloud);
-  }
-  return;
 }
 
 void Lddc::InitPointcloud2MsgHeader(PointCloud2 &cloud) {
@@ -313,10 +278,7 @@ void Lddc::PublishPointcloud2Data(const uint8_t index, const uint64_t timestamp,
     publisher_ptr = std::dynamic_pointer_cast<Publisher<PointCloud2>>(
         GetCurrentPublisher(index));
   }
-  if (kOutputToRos == output_type_) {
-    publisher_ptr->publish(cloud);
-  } else {
-  }
+  publisher_ptr->publish(cloud);
 }
 
 void Lddc::InitCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg,
@@ -365,30 +327,7 @@ void Lddc::PublishCustomPointData(const CustomMsg &livox_msg,
       std::dynamic_pointer_cast<Publisher<CustomMsg>>(
           GetCurrentPublisher(index));
 
-  if (kOutputToRos == output_type_) {
-    publisher_ptr->publish(livox_msg);
-  } else {
-  }
-}
-
-void Lddc::InitPclMsg(const StoragePacket &pkg, PointCloud &cloud,
-                      uint64_t &timestamp) {
-  std::cout << "warning: pcl::PointCloud is not supported in ROS2, "
-            << "please check code logic" << std::endl;
-  return;
-}
-
-void Lddc::FillPointsToPclMsg(const StoragePacket &pkg, PointCloud &pcl_msg) {
-  std::cout << "warning: pcl::PointCloud is not supported in ROS2, "
-            << "please check code logic" << std::endl;
-  return;
-}
-
-void Lddc::PublishPclData(const uint8_t index, const uint64_t timestamp,
-                          const PointCloud &cloud) {
-  std::cout << "warning: pcl::PointCloud is not supported in ROS2, "
-            << "please check code logic" << std::endl;
-  return;
+  publisher_ptr->publish(livox_msg);
 }
 
 void Lddc::InitImuMsg(const ImuData &imu_data, ImuMsg &imu_msg,
@@ -422,10 +361,7 @@ void Lddc::PublishImuData(LidarImuDataQueue &imu_data_queue,
       std::dynamic_pointer_cast<Publisher<ImuMsg>>(
           GetCurrentImuPublisher(index));
 
-  if (kOutputToRos == output_type_) {
-    publisher_ptr->publish(imu_msg);
-  } else {
-  }
+  publisher_ptr->publish(imu_msg);
 }
 
 std::shared_ptr<rclcpp::PublisherBase>
@@ -545,7 +481,5 @@ Lddc::GetCurrentImuPublisher(uint8_t handle) {
     return global_imu_pub_;
   }
 }
-
-void Lddc::CreateBagFile(const std::string &file_name) {}
 
 } // namespace livox_ros

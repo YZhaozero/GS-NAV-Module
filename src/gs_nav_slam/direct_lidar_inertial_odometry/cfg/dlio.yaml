@@ -1,0 +1,45 @@
+###########################################################
+#                                                         #
+# Copyright (c)                                           #
+#                                                         #
+# The Verifiable & Control-Theoretic Robotics (VECTR) Lab #
+# University of California, Los Angeles                   #
+#                                                         #
+# Authors: Kenny J. Chen, Ryan Nemiroff, Brett T. Lopez   #
+# Contact: {kennyjchen, ryguyn, btlopez}@ucla.edu         #
+#                                                         #
+###########################################################
+
+/**:
+  ros__parameters:
+
+    version: 1.1.1
+
+    adaptive: true
+
+    pointcloud/deskew: true
+    pointcloud/voxelize: true
+
+    imu/calibration: true
+    imu/intrinsics/accel/bias: [ 0.0, 0.0, 0.0 ]
+    imu/intrinsics/accel/sm:   [ 1.,  0.,  0.,
+                                 0.,  1.,  0.,
+                                 0.,  0.,  1. ]
+    imu/intrinsics/gyro/bias: [ 0.0, 0.0, 0.0 ]
+
+    # 当前 Livox 驱动会先用 MID360_config.json 的安装外参同时旋转点云和
+    # IMU，再以 livox_frame 发布。这里保持单位变换，避免重复应用 30° pitch。
+    # 实测安装平移也应优先填写到 MID360_config.json 的 x/y/z 中。
+    # extrinsics/baselink2imu/t: [ 0.006253, -0.011775, 0.007645 ]
+    extrinsics/baselink2imu/t: [ 0.0, 0.0, 0.0]
+    extrinsics/baselink2imu/R: [ 1.,  0.,  0.,
+                                 0.,  1.,  0.,
+                                 0.,  0.,  1. ]
+    extrinsics/baselink2lidar/t: [ 0.,  0.,  0. ]
+    extrinsics/baselink2lidar/R: [ 1.,  0.,  0.,
+                                   0.,  1.,  0.,
+                                   0.,  0.,  1. ]
+    # extrinsics/baselink2lidar/t: [ 0.,  0.,  0.5 ]
+    # extrinsics/baselink2lidar/R: [ 1.,  0.,  0.,
+    #                                0.,  -1.,  0.,
+    #                                0.,  0.,  -1. ]

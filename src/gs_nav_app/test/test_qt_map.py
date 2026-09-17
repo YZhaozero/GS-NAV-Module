@@ -5,6 +5,7 @@ from pathlib import Path as FilePath
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
+import yaml  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 from nav_msgs.msg import Path  # noqa: E402
 from PyQt5.QtCore import QEvent, QPointF, Qt  # noqa: E402
@@ -19,6 +20,15 @@ from gs_nav_app.qt_nav_node import (  # noqa: E402
 )
 from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
 from gs_nav_app.map_processing import pointcloud_to_grid  # noqa: E402
+
+
+def test_navigation_yaml_matches_the_runtime_node_name():
+    config_path = FilePath(__file__).parents[1] / "config" / "gs_nav.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    assert "/gs_qt_nav" in config
+    parameters = config["/gs_qt_nav"]["ros__parameters"]
+    assert parameters["camera_topic"] == "/camera/camera/color/image_raw"
+    assert parameters["camera_info_topic"] == "/camera/camera/color/camera_info"
 
 
 def test_map_click_coordinate_round_trip():
@@ -427,6 +437,7 @@ def test_navigation_and_map_processing_are_separate_workspaces():
 
     class FakeNode:
         navigation_status = "ready"
+        camera_topic = "/camera/camera/color/image_raw"
 
         def send_navigation_waypoints(self, waypoints):
             return bool(waypoints)
@@ -439,8 +450,10 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     assert window.convert_coordinates_combo.currentData() == "display"
     assert window.map_panel._cloud_3d_enabled
     assert window.camera_panel.maximumHeight() == 260
+    assert window.camera_panel._camera_topic == FakeNode.camera_topic
     assert not window.camera_panel._show_status
     assert window.active_page.camera_panel._show_status
+    assert window.active_page.camera_panel._camera_topic == FakeNode.camera_topic
     assert window.active_page.map_panel._cloud_3d_enabled
     assert not window.active_page.map_panel.testAttribute(
         Qt.WA_TransparentForMouseEvents)

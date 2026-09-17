@@ -107,10 +107,14 @@ class CameraPanel(QWidget):
     """Raw camera display with a resolution-independent Qt vector overlay."""
 
     def __init__(
-        self, show_status: bool = True, compact: bool = False,
+        self,
+        show_status: bool = True,
+        compact: bool = False,
+        camera_topic: str = "/color/image_raw",
     ) -> None:
         super().__init__()
         self._show_status = show_status
+        self._camera_topic = camera_topic
         if compact:
             self.setMinimumSize(280, 160)
         else:
@@ -164,7 +168,8 @@ class CameraPanel(QWidget):
         else:
             painter.setPen(QColor("#e5ebef"))
             painter.setFont(QFont("Sans Serif", 20, QFont.DemiBold))
-            painter.drawText(target, Qt.AlignCenter, "等待相机 /color/image_raw")
+            painter.drawText(
+                target, Qt.AlignCenter, f"等待相机 {self._camera_topic}")
 
         if self._route is not None:
             self._draw_route(painter, target)
@@ -1511,6 +1516,11 @@ class QtNavRosNode(Node):
             camera_height_m=float(self.get_parameter("camera_height_m").value),
             horizon_ratio=float(self.get_parameter("horizon_ratio").value),
         )
+        self.camera_topic = str(self.get_parameter("camera_topic").value)
+        self.camera_info_topic = str(
+            self.get_parameter("camera_info_topic").value)
+        self.map_topic = str(self.get_parameter("map_topic").value)
+        self.path_topic = str(self.get_parameter("path_topic").value)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -1531,17 +1541,13 @@ class QtNavRosNode(Node):
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(
-            Image, str(self.get_parameter("camera_topic").value),
-            self._on_image, sensor_qos)
+            Image, self.camera_topic, self._on_image, sensor_qos)
         self.create_subscription(
-            CameraInfo, str(self.get_parameter("camera_info_topic").value),
-            self._on_camera_info, sensor_qos)
+            CameraInfo, self.camera_info_topic, self._on_camera_info, sensor_qos)
         self.create_subscription(
-            OccupancyGrid, str(self.get_parameter("map_topic").value),
-            self._on_map, map_qos)
+            OccupancyGrid, self.map_topic, self._on_map, map_qos)
         self.create_subscription(
-            Path, str(self.get_parameter("path_topic").value),
-            self._on_path, reliable_qos)
+            Path, self.path_topic, self._on_path, reliable_qos)
         pointcloud_topic = str(self.get_parameter("pointcloud_topic").value)
         if pointcloud_topic:
             self.create_subscription(
@@ -1570,8 +1576,9 @@ class QtNavRosNode(Node):
         self.navigation_result_revision = 0
         self.goal_handle = None
         self.get_logger().info(
-            "Qt navigation ready: camera=/color/image_raw, map=/map, "
-            "path=/global_plan, action=/navigate_through_poses")
+            f"Qt navigation ready: camera={self.camera_topic}, "
+            f"camera_info={self.camera_info_topic}, map={self.map_topic}, "
+            f"path={self.path_topic}, action=/navigate_through_poses")
 
     def _on_image(self, msg: Image) -> None:
         try:
@@ -1798,10 +1805,14 @@ class QtNavRosNode(Node):
 class ActiveNavigationPage(QWidget):
     """Distraction-free camera view used while a task is active."""
 
-    def __init__(self, exit_callback, mode_callback=None) -> None:
+    def __init__(
+        self, exit_callback, mode_callback=None,
+        camera_topic: str = "/color/image_raw",
+    ) -> None:
         super().__init__()
         self._mode_callback = mode_callback
-        self.camera_panel = CameraPanel(show_status=True)
+        self.camera_panel = CameraPanel(
+            show_status=True, camera_topic=camera_topic)
         self.camera_panel.setParent(self)
         self.map_panel = MapPanel(cloud_3d=True)
         self.map_panel.setObjectName("activeMap")
@@ -2024,7 +2035,10 @@ class NavigationWindow(QMainWindow):
         camera_title = QLabel("实时相机")
         camera_title.setObjectName("sectionTitle")
         side_layout.addWidget(camera_title)
-        self.camera_panel = CameraPanel(show_status=False, compact=True)
+        camera_topic = str(getattr(
+            self.node, "camera_topic", "/color/image_raw"))
+        self.camera_panel = CameraPanel(
+            show_status=False, compact=True, camera_topic=camera_topic)
         self.camera_panel.setObjectName("card")
         self.camera_panel.setMinimumHeight(170)
         self.camera_panel.setMaximumHeight(260)
@@ -2080,7 +2094,10 @@ class NavigationWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         self.setup_page = root
         self.active_page = ActiveNavigationPage(
-            self.exit_navigation, self.set_navigation_map_mode)
+            self.exit_navigation,
+            self.set_navigation_map_mode,
+            camera_topic=camera_topic,
+        )
         self.map_tools_page = self._build_map_tools_page()
         self.sensor_tools_page = self._build_sensor_tools_page()
         self.pages = QStackedWidget()

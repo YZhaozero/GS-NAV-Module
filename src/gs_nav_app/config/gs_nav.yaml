@@ -1,4 +1,5 @@
-gs_ar_nav:
+# 必须与 ar_nav.launch.py 中 Qt 节点的 name="gs_qt_nav" 保持一致。
+/gs_qt_nav:
   ros__parameters:
     # 与 mecanum_navigation 启动文件保持相同的仿真时钟。
     use_sim_time: true

@@ -2,8 +2,8 @@ gs_ar_nav:
   ros__parameters:
     # 与 mecanum_navigation 启动文件保持相同的仿真时钟。
     use_sim_time: true
-    camera_topic: /color/image_raw
-    camera_info_topic: /color/camera_info
+    camera_topic: /camera/camera/color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
     # 直接使用导航 map_server 发布的同一份栅格地图。
     map_topic: /map
     # TEB 全局规划路径发布话题。

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import re
 import signal
 import sys
 from pathlib import Path as FilePath
@@ -10,10 +12,19 @@ from typing import Optional, Tuple
 
 import numpy as np
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses
 from nav_msgs.msg import OccupancyGrid, Path
-from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import (
+    QObject,
+    QPointF,
+    QProcess,
+    QRectF,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt5.QtGui import (
     QColor,
     QFont,
@@ -32,14 +43,18 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -79,6 +94,9 @@ from .nav_math import (
     project_optical,
     transform_matrix,
 )
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def yaw_quaternion(yaw: float) -> Tuple[float, float]:
@@ -192,6 +210,192 @@ class CameraPanel(QWidget):
         state = "相机在线 · 全局路径" if self._camera_live else "等待相机数据"
         painter.drawText(
             card.adjusted(17, 34, -10, -7), Qt.AlignLeft | Qt.AlignVCenter, state)
+
+
+class SensorLaunchProcess(QObject):
+    """Own one ros2 launch process and expose its combined output to Qt."""
+
+    log_received = pyqtSignal(str)
+    state_changed = pyqtSignal(str)
+
+    def __init__(self, display_name: str, parent=None) -> None:
+        super().__init__(parent)
+        self.display_name = display_name
+        self._requested_stop = False
+        self._process_group_id: Optional[int] = None
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._read_output)
+        self.process.started.connect(self._on_started)
+        self.process.finished.connect(self._on_finished)
+        self.process.errorOccurred.connect(self._on_error)
+
+    @property
+    def running(self) -> bool:
+        return self.process.state() != QProcess.NotRunning
+
+    def start_launch(self, arguments) -> bool:
+        if self.running:
+            self.log_received.emit(f"{self.display_name}已经在运行\n")
+            return False
+        command = "ros2 " + " ".join(str(value) for value in arguments)
+        self.log_received.emit(f"$ {command}\n")
+        self._requested_stop = False
+        self._process_group_id = None
+        self.state_changed.emit("starting")
+        # Start every launch in its own session.  Signalling only the outer
+        # ``ros2 launch`` process leaves driver nodes behind; a dedicated
+        # process group lets Stop reliably reach the whole launch tree.
+        self.process.start(
+            "setsid", ["ros2", *[str(value) for value in arguments]])
+        return True
+
+    def stop_launch(self) -> None:
+        if not self.running:
+            self.log_received.emit(f"{self.display_name}当前未运行\n")
+            self.state_changed.emit("stopped")
+            return
+        self.log_received.emit(f"正在停止{self.display_name}…\n")
+        self._requested_stop = True
+        self.state_changed.emit("stopping")
+        self._capture_process_group()
+        self._signal_process_group(signal.SIGINT)
+        QTimer.singleShot(1800, self._terminate_if_alive)
+
+    def shutdown(self) -> None:
+        if not self.running and not self._group_alive():
+            return
+        self._requested_stop = True
+        self._capture_process_group()
+        self._signal_process_group(signal.SIGINT)
+        if not self.process.waitForFinished(1500):
+            self._signal_process_group(signal.SIGTERM)
+            self.process.waitForFinished(700)
+        if self._group_alive():
+            self._signal_process_group(signal.SIGKILL)
+            self.process.waitForFinished(500)
+        self._finish_stopping()
+
+    def _capture_process_group(self) -> None:
+        if self._process_group_id is None:
+            process_id = int(self.process.processId())
+            if process_id > 0:
+                self._process_group_id = process_id
+
+    def _on_started(self) -> None:
+        self._capture_process_group()
+        self.state_changed.emit("running")
+
+    def _group_alive(self) -> bool:
+        group_id = self._process_group_id
+        if group_id is None:
+            return False
+        group_seen = False
+        try:
+            for entry in os.scandir("/proc"):
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    stat = FilePath(entry.path, "stat").read_text()
+                    fields = stat[stat.rfind(")") + 2:].split()
+                    if len(fields) > 2 and int(fields[2]) == group_id:
+                        group_seen = True
+                        if fields[0] not in ("Z", "X"):
+                            return True
+                except (OSError, ValueError):
+                    continue
+            if group_seen:
+                # Zombies have already stopped executing and only await reaping.
+                return False
+        except OSError:
+            pass
+        try:
+            os.killpg(group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _signal_process_group(self, signal_number: int) -> None:
+        self._capture_process_group()
+        if self._process_group_id is not None:
+            try:
+                os.killpg(self._process_group_id, signal_number)
+                return
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                pass
+        if self.running:
+            if signal_number == signal.SIGKILL:
+                self.process.kill()
+            else:
+                self.process.terminate()
+
+    def _terminate_if_alive(self) -> None:
+        if not self._requested_stop:
+            return
+        if self._group_alive() or self.running:
+            self.log_received.emit(
+                f"{self.display_name}仍在退出，正在终止整个进程组…\n")
+            self._signal_process_group(signal.SIGTERM)
+        QTimer.singleShot(1500, self._kill_if_alive)
+
+    def _kill_if_alive(self) -> None:
+        if not self._requested_stop:
+            return
+        if self._group_alive() or self.running:
+            self.log_received.emit(
+                f"{self.display_name}仍有残留进程，正在强制结束整个进程组…\n")
+            self._signal_process_group(signal.SIGKILL)
+        QTimer.singleShot(150, self._finish_stopping)
+
+    def _finish_stopping(self) -> None:
+        if not self._requested_stop:
+            return
+        if self._group_alive():
+            self.log_received.emit(
+                f"{self.display_name}进程组尚未完全退出，将再次强制清理…\n")
+            self._signal_process_group(signal.SIGKILL)
+            QTimer.singleShot(200, self._finish_stopping)
+            return
+        self._requested_stop = False
+        self._process_group_id = None
+        self.log_received.emit(f"\n{self.display_name}进程已完全停止\n")
+        self.state_changed.emit("stopped")
+
+    def _read_output(self) -> None:
+        data = bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace")
+        if data:
+            self.log_received.emit(data)
+
+    def _on_finished(self, exit_code: int, _exit_status) -> None:
+        self._read_output()
+        if self._requested_stop:
+            if not self._group_alive():
+                self._finish_stopping()
+            return
+        if self._group_alive():
+            self.log_received.emit(
+                f"\n{self.display_name}主进程已结束，但检测到残留子进程，正在清理…\n")
+            self._requested_stop = True
+            self.state_changed.emit("stopping")
+            self._signal_process_group(signal.SIGTERM)
+            QTimer.singleShot(1000, self._kill_if_alive)
+            return
+        self._process_group_id = None
+        self.log_received.emit(
+            f"\n{self.display_name}进程已结束（退出码 {exit_code}）\n")
+        self.state_changed.emit("stopped")
+
+    def _on_error(self, error) -> None:
+        if self._requested_stop and error == QProcess.Crashed:
+            return
+        self.log_received.emit(
+            f"{self.display_name}进程错误：{self.process.errorString()} ({error})\n")
+        self.state_changed.emit("error")
 
 
 class MapPanel(QWidget):
@@ -1720,6 +1924,11 @@ class NavigationWindow(QMainWindow):
         self._rendered_grid_edit_revision = -1
         self._rendered_cloud_edit_revision = -1
         self._undo_stack = []
+        self.sensor_processes = {}
+        self.sensor_state_labels = {}
+        self.sensor_start_buttons = {}
+        self.sensor_stop_buttons = {}
+        self.sensor_log_views = {}
         self.setWindowTitle("GS Navigation Console")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
@@ -1753,6 +1962,10 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+        self.open_sensor_tools_button = QPushButton("传感器管理")
+        self.open_sensor_tools_button.setObjectName("workspaceButton")
+        self.open_sensor_tools_button.clicked.connect(self.show_sensor_tools)
+        header.addWidget(self.open_sensor_tools_button)
         self.open_map_tools_button = QPushButton("地图处理")
         self.open_map_tools_button.setObjectName("workspaceButton")
         self.open_map_tools_button.clicked.connect(self.show_map_tools)
@@ -1869,12 +2082,303 @@ class NavigationWindow(QMainWindow):
         self.active_page = ActiveNavigationPage(
             self.exit_navigation, self.set_navigation_map_mode)
         self.map_tools_page = self._build_map_tools_page()
+        self.sensor_tools_page = self._build_sensor_tools_page()
         self.pages = QStackedWidget()
         self.pages.addWidget(self.setup_page)
         self.pages.addWidget(self.map_tools_page)
+        self.pages.addWidget(self.sensor_tools_page)
         self.pages.addWidget(self.active_page)
         self.setCentralWidget(self.pages)
         self.setStyleSheet(self._style_sheet())
+
+    def _build_sensor_tools_page(self) -> QWidget:
+        """Build the local driver launcher and its live log console."""
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("GS SENSOR MANAGER")
+        title.setObjectName("title")
+        subtitle = QLabel("雷达与相机驱动 · 启动参数 · 实时进程日志")
+        subtitle.setObjectName("subtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box)
+        header.addStretch(1)
+        back_button = QPushButton("返回导航")
+        back_button.setObjectName("workspaceButton")
+        back_button.clicked.connect(self.show_navigation_setup)
+        header.addWidget(back_button)
+        layout.addLayout(header)
+
+        splitter = QSplitter(Qt.Horizontal)
+        controls = QFrame()
+        controls.setObjectName("sidePanel")
+        controls.setMinimumWidth(440)
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(16, 16, 16, 16)
+        controls_layout.setSpacing(12)
+        control_title = QLabel("驱动控制")
+        control_title.setObjectName("sectionTitle")
+        controls_layout.addWidget(control_title)
+        self.sensor_control_tabs = QTabWidget()
+        self.sensor_control_tabs.addTab(self._build_lidar_controls(), "雷达")
+        self.sensor_control_tabs.addTab(self._build_camera_controls(), "相机")
+        controls_layout.addWidget(self.sensor_control_tabs, 1)
+        splitter.addWidget(controls)
+
+        log_card = QFrame()
+        log_card.setObjectName("sidePanel")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(16, 16, 16, 16)
+        log_header = QHBoxLayout()
+        log_title = QLabel("启动日志")
+        log_title.setObjectName("sectionTitle")
+        log_header.addWidget(log_title)
+        log_header.addStretch(1)
+        clear_button = QPushButton("清空日志")
+        clear_button.setObjectName("secondaryButton")
+        clear_button.clicked.connect(self._clear_sensor_logs)
+        log_header.addWidget(clear_button)
+        log_layout.addLayout(log_header)
+        self.sensor_log_tabs = QTabWidget()
+        for key, label in (("all", "全部"), ("lidar", "雷达"), ("camera", "相机")):
+            view = QPlainTextEdit()
+            view.setObjectName("sensorLog")
+            view.setReadOnly(True)
+            view.setLineWrapMode(QPlainTextEdit.NoWrap)
+            view.document().setMaximumBlockCount(3000)
+            self.sensor_log_views[key] = view
+            self.sensor_log_tabs.addTab(view, label)
+        log_layout.addWidget(self.sensor_log_tabs, 1)
+        splitter.addWidget(log_card)
+        splitter.setSizes([500, 900])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+        for key, display_name in (("lidar", "雷达"), ("camera", "相机")):
+            controller = SensorLaunchProcess(display_name, self)
+            controller.log_received.connect(
+                lambda text, sensor=key: self._append_sensor_log(sensor, text))
+            controller.state_changed.connect(
+                lambda state, sensor=key: self._handle_sensor_state(sensor, state))
+            self.sensor_processes[key] = controller
+            self._handle_sensor_state(key, "stopped")
+        return root
+
+    def _sensor_action_row(self, key: str, start_text: str) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+        status = QLabel("未启动")
+        status.setObjectName("sensorStatus")
+        start = QPushButton(start_text)
+        start.setObjectName("primaryButton")
+        stop = QPushButton("停止")
+        stop.setObjectName("dangerButton")
+        start.clicked.connect(lambda: self._start_sensor(key))
+        stop.clicked.connect(lambda: self._stop_sensor(key))
+        layout.addWidget(status)
+        layout.addStretch(1)
+        layout.addWidget(stop)
+        layout.addWidget(start)
+        self.sensor_state_labels[key] = status
+        self.sensor_start_buttons[key] = start
+        self.sensor_stop_buttons[key] = stop
+        return widget
+
+    def _build_lidar_controls(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lidar_xfer_format = QComboBox()
+        self.lidar_xfer_format.addItem("Livox CustomMsg", 4)
+        self.lidar_xfer_format.addItem("PointCloud2", 0)
+        form.addRow("输出格式", self.lidar_xfer_format)
+        self.lidar_publish_frequency = QDoubleSpinBox()
+        self.lidar_publish_frequency.setRange(1.0, 100.0)
+        self.lidar_publish_frequency.setDecimals(1)
+        self.lidar_publish_frequency.setValue(10.0)
+        self.lidar_publish_frequency.setSuffix(" Hz")
+        form.addRow("发布频率", self.lidar_publish_frequency)
+        self.lidar_frame_id = QLineEdit("livox_frame")
+        form.addRow("坐标系 frame_id", self.lidar_frame_id)
+        self.lidar_multi_topic = QCheckBox("每台雷达使用独立话题")
+        form.addRow("多话题", self.lidar_multi_topic)
+        config_row = QWidget()
+        config_layout = QHBoxLayout(config_row)
+        config_layout.setContentsMargins(0, 0, 0, 0)
+        self.lidar_config_path = QLineEdit()
+        self.lidar_config_path.setPlaceholderText("留空使用 MID360_config.json")
+        browse = QPushButton("选择")
+        browse.setObjectName("secondaryButton")
+        browse.clicked.connect(self._choose_lidar_config)
+        config_layout.addWidget(self.lidar_config_path, 1)
+        config_layout.addWidget(browse)
+        form.addRow("配置文件", config_row)
+        layout.addLayout(form)
+        hint = QLabel(
+            "对应 livox_ros_driver2/msg_MID360_launch.py。参数会作为 ROS 2 "
+            "launch 参数传入，不会修改驱动配置文件。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        layout.addWidget(self._sensor_action_row("lidar", "雷达启动"))
+        return root
+
+    def _build_camera_controls(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.camera_name_input = QLineEdit("camera")
+        self.camera_namespace_input = QLineEdit("camera")
+        self.camera_serial_input = QLineEdit()
+        self.camera_serial_input.setPlaceholderText("留空自动选择设备")
+        form.addRow("相机名称", self.camera_name_input)
+        form.addRow("命名空间", self.camera_namespace_input)
+        form.addRow("设备序列号", self.camera_serial_input)
+        self.camera_enable_color = QCheckBox("彩色图像")
+        self.camera_enable_depth = QCheckBox("深度图像")
+        self.camera_enable_gyro = QCheckBox("陀螺仪")
+        self.camera_enable_accel = QCheckBox("加速度计")
+        for checkbox in (
+            self.camera_enable_color, self.camera_enable_depth,
+            self.camera_enable_gyro, self.camera_enable_accel,
+        ):
+            checkbox.setChecked(True)
+        stream_row = QWidget()
+        stream_layout = QVBoxLayout(stream_row)
+        stream_layout.setContentsMargins(0, 0, 0, 0)
+        stream_layout.setSpacing(4)
+        first_stream_row = QHBoxLayout()
+        first_stream_row.addWidget(self.camera_enable_color)
+        first_stream_row.addWidget(self.camera_enable_depth)
+        first_stream_row.addStretch(1)
+        second_stream_row = QHBoxLayout()
+        second_stream_row.addWidget(self.camera_enable_gyro)
+        second_stream_row.addWidget(self.camera_enable_accel)
+        second_stream_row.addStretch(1)
+        stream_layout.addLayout(first_stream_row)
+        stream_layout.addLayout(second_stream_row)
+        form.addRow("数据流", stream_row)
+        self.camera_enable_sync = QCheckBox("同步彩色与深度")
+        self.camera_enable_sync.setChecked(True)
+        self.camera_align_depth = QCheckBox("深度对齐到彩色图")
+        self.camera_align_depth.setChecked(True)
+        self.camera_pointcloud = QCheckBox("由相机生成点云")
+        form.addRow("同步", self.camera_enable_sync)
+        form.addRow("深度对齐", self.camera_align_depth)
+        form.addRow("点云", self.camera_pointcloud)
+        self.camera_unite_imu = QComboBox()
+        self.camera_unite_imu.addItem("不合并 (0)", "0")
+        self.camera_unite_imu.addItem("复制插值 (1)", "1")
+        self.camera_unite_imu.addItem("线性插值 (2)", "2")
+        self.camera_unite_imu.setCurrentIndex(2)
+        form.addRow("IMU 合并方式", self.camera_unite_imu)
+        layout.addLayout(form)
+        hint = QLabel(
+            "对应 realsense2_camera/d435i.launch.py。默认开启 RGB、深度与 IMU，"
+            "发布的彩色图可供导航界面订阅。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        layout.addWidget(self._sensor_action_row("camera", "相机启动"))
+        return root
+
+    @staticmethod
+    def _launch_bool(value: bool) -> str:
+        return "true" if value else "false"
+
+    def _lidar_launch_arguments(self):
+        arguments = [
+            "launch", "livox_ros_driver2", "msg_MID360_launch.py",
+            f"xfer_format:={self.lidar_xfer_format.currentData()}",
+            f"multi_topic:={int(self.lidar_multi_topic.isChecked())}",
+            f"publish_freq:={self.lidar_publish_frequency.value():g}",
+            f"frame_id:={self.lidar_frame_id.text().strip() or 'livox_frame'}",
+        ]
+        config_path = self.lidar_config_path.text().strip()
+        if config_path:
+            arguments.append(f"user_config_path:={config_path}")
+        return arguments
+
+    def _camera_launch_arguments(self):
+        arguments = [
+            "launch", "realsense2_camera", "d435i.launch.py",
+            f"camera_name:={self.camera_name_input.text().strip() or 'camera'}",
+            f"camera_namespace:={self.camera_namespace_input.text().strip() or 'camera'}",
+            f"enable_color:={self._launch_bool(self.camera_enable_color.isChecked())}",
+            f"enable_depth:={self._launch_bool(self.camera_enable_depth.isChecked())}",
+            f"enable_gyro:={self._launch_bool(self.camera_enable_gyro.isChecked())}",
+            f"enable_accel:={self._launch_bool(self.camera_enable_accel.isChecked())}",
+            f"unite_imu_method:={self.camera_unite_imu.currentData()}",
+            f"enable_sync:={self._launch_bool(self.camera_enable_sync.isChecked())}",
+            f"align_depth.enable:={self._launch_bool(self.camera_align_depth.isChecked())}",
+            f"pointcloud.enable:={self._launch_bool(self.camera_pointcloud.isChecked())}",
+        ]
+        serial = self.camera_serial_input.text().strip()
+        if serial:
+            arguments.append(f"serial_no:={serial}")
+        return arguments
+
+    def _choose_lidar_config(self) -> None:
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "选择 Livox 配置", self.lidar_config_path.text(),
+            "JSON 配置 (*.json);;所有文件 (*)")
+        if path:
+            self.lidar_config_path.setText(path)
+
+    def _start_sensor(self, key: str) -> None:
+        builder = (
+            self._lidar_launch_arguments
+            if key == "lidar" else self._camera_launch_arguments)
+        self.sensor_processes[key].start_launch(builder())
+
+    def _stop_sensor(self, key: str) -> None:
+        self.sensor_processes[key].stop_launch()
+
+    def _handle_sensor_state(self, key: str, state: str) -> None:
+        labels = {
+            "starting": ("启动中…", "#ffd166"),
+            "running": ("运行中", "#66e09a"),
+            "stopping": ("停止中…", "#ffd166"),
+            "stopped": ("未启动", "#91a2ad"),
+            "error": ("启动失败", "#ff7f88"),
+        }
+        text, color = labels.get(state, (state, "#91a2ad"))
+        label = self.sensor_state_labels.get(key)
+        if label is not None:
+            label.setText(f"● {text}")
+            label.setStyleSheet(f"color: {color}; font-weight: 700;")
+        running = state in ("starting", "running", "stopping")
+        if key in self.sensor_start_buttons:
+            self.sensor_start_buttons[key].setEnabled(not running)
+        if key in self.sensor_stop_buttons:
+            self.sensor_stop_buttons[key].setEnabled(
+                state in ("starting", "running"))
+
+    def _append_sensor_log(self, key: str, text: str) -> None:
+        if not text:
+            return
+        clean = ANSI_ESCAPE_RE.sub("", text).replace("\r", "").rstrip("\n")
+        if not clean:
+            return
+        self.sensor_log_views[key].appendPlainText(clean)
+        prefix = "雷达" if key == "lidar" else "相机"
+        self.sensor_log_views["all"].appendPlainText(
+            "\n".join(f"[{prefix}] {line}" for line in clean.splitlines()))
+
+    def _clear_sensor_logs(self) -> None:
+        for view in self.sensor_log_views.values():
+            view.clear()
 
     def _build_map_tools_page(self) -> QWidget:
         root = QWidget()
@@ -2162,9 +2666,27 @@ class NavigationWindow(QMainWindow):
         QPushButton#mapModeButton:checked {
             background: #00a9df; border-color: #32c5ef; color: #031016;
         }
-        QComboBox, QDoubleSpinBox {
+        QComboBox, QDoubleSpinBox, QLineEdit {
             min-height: 30px; background: #17222c; border: 1px solid #344652;
             border-radius: 5px; padding: 0 6px; color: #dbe4e9;
+        }
+        QGroupBox {
+            border: 1px solid #2c3b46; border-radius: 8px;
+            margin-top: 9px; padding-top: 8px; font-weight: 650;
+        }
+        QTabWidget::pane {
+            border: 1px solid #2c3b46; border-radius: 7px; background: #0e161e;
+        }
+        QTabBar::tab {
+            min-width: 82px; min-height: 30px; padding: 2px 12px;
+            background: #141f28; color: #9eb0bb;
+            border: 1px solid #2c3b46;
+        }
+        QTabBar::tab:selected { background: #174a60; color: #ffffff; }
+        QPlainTextEdit#sensorLog {
+            background: #080d12; color: #b9d9c5; border: none;
+            font-family: Monospace; font-size: 12px; padding: 8px;
+            selection-background-color: #245b70;
         }
         QListWidget#waypointList {
             background: #111b24; border: 1px solid #2d3e4a;
@@ -2215,6 +2737,10 @@ class NavigationWindow(QMainWindow):
     def show_map_tools(self) -> None:
         """Open the standalone map processing workspace."""
         self.pages.setCurrentWidget(self.map_tools_page)
+
+    def show_sensor_tools(self) -> None:
+        """Open the standalone sensor driver workspace."""
+        self.pages.setCurrentWidget(self.sensor_tools_page)
 
     def show_navigation_setup(self) -> None:
         """Return to navigation without starting or cancelling a task."""
@@ -2877,6 +3403,14 @@ class NavigationWindow(QMainWindow):
         self.active_page.map_panel.set_navigation_state(
             path, robot_xy, robot_yaw)
         self.nav_status.setText(self.node.navigation_status)
+
+    def closeEvent(self, event) -> None:
+        """Stop child launch processes before closing the desktop app."""
+        self.refresh_timer.stop()
+        self.navigation_return_timer.stop()
+        for controller in self.sensor_processes.values():
+            controller.shutdown()
+        super().closeEvent(event)
 
 
 def main(args=None) -> None:

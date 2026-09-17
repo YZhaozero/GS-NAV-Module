@@ -1,4 +1,6 @@
 import os
+import time
+from pathlib import Path as FilePath
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,6 +15,7 @@ from gs_nav_app.qt_nav_node import (  # noqa: E402
     MapPanel,
     NavigationWindow,
     QtNavRosNode,
+    SensorLaunchProcess,
 )
 from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
 from gs_nav_app.map_processing import pointcloud_to_grid  # noqa: E402
@@ -283,6 +286,139 @@ def test_successful_navigation_shows_transition_before_returning():
     assert window.waypoints == []
     assert not node.cancelled
     assert node.navigation_status == "导航成功，已自动返回地图"
+
+
+def test_sensor_manager_has_independent_page_and_launch_arguments():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    window = NavigationWindow(FakeNode())
+    window.refresh_timer.stop()
+    window.show_sensor_tools()
+    assert window.pages.currentWidget() is window.sensor_tools_page
+
+    lidar = window._lidar_launch_arguments()
+    assert lidar[:3] == [
+        "launch", "livox_ros_driver2", "msg_MID360_launch.py"]
+    assert "xfer_format:=4" in lidar
+    assert "publish_freq:=10" in lidar
+    assert "frame_id:=livox_frame" in lidar
+
+    window.lidar_xfer_format.setCurrentIndex(1)
+    window.lidar_multi_topic.setChecked(True)
+    window.lidar_config_path.setText("/tmp/MID360 test.json")
+    lidar = window._lidar_launch_arguments()
+    assert "xfer_format:=0" in lidar
+    assert "multi_topic:=1" in lidar
+    assert "user_config_path:=/tmp/MID360 test.json" in lidar
+
+    camera = window._camera_launch_arguments()
+    assert camera[:3] == [
+        "launch", "realsense2_camera", "d435i.launch.py"]
+    assert "enable_color:=true" in camera
+    assert "enable_depth:=true" in camera
+    assert "unite_imu_method:=2" in camera
+    assert "pointcloud.enable:=false" in camera
+    assert not any(value.startswith("serial_no:=") for value in camera)
+
+    window.camera_serial_input.setText("123456")
+    window.camera_pointcloud.setChecked(True)
+    camera = window._camera_launch_arguments()
+    assert "serial_no:=123456" in camera
+    assert "pointcloud.enable:=true" in camera
+
+
+def test_sensor_logs_are_split_and_process_state_updates_controls():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    window = NavigationWindow(FakeNode())
+    window.refresh_timer.stop()
+    window._append_sensor_log(
+        "lidar", "\x1b[32mdriver ready\x1b[0m\npoint published\r\n")
+    assert "driver ready" in window.sensor_log_views["lidar"].toPlainText()
+    assert "\x1b" not in window.sensor_log_views["lidar"].toPlainText()
+    assert "[雷达] driver ready" in window.sensor_log_views["all"].toPlainText()
+    assert window.sensor_log_views["camera"].toPlainText() == ""
+
+    window._handle_sensor_state("lidar", "running")
+    assert not window.sensor_start_buttons["lidar"].isEnabled()
+    assert window.sensor_stop_buttons["lidar"].isEnabled()
+    assert "运行中" in window.sensor_state_labels["lidar"].text()
+    window._handle_sensor_state("lidar", "stopped")
+    assert window.sensor_start_buttons["lidar"].isEnabled()
+    assert not window.sensor_stop_buttons["lidar"].isEnabled()
+
+    window._clear_sensor_logs()
+    assert window.sensor_log_views["all"].toPlainText() == ""
+    assert window.sensor_log_views["lidar"].toPlainText() == ""
+
+
+def test_sensor_stop_terminates_the_complete_launch_process_group(
+    tmp_path, monkeypatch,
+):
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    child_pid_file = tmp_path / "child.pid"
+    fake_ros2 = fake_bin / "ros2"
+    fake_ros2.write_text(
+        "#!/bin/sh\n"
+        "sleep 60 &\n"
+        "echo $! > \"$FAKE_SENSOR_CHILD_PID\"\n"
+        "wait\n")
+    fake_ros2.chmod(0o755)
+    monkeypatch.setenv("FAKE_SENSOR_CHILD_PID", str(child_pid_file))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    controller = SensorLaunchProcess("测试传感器")
+    states = []
+    controller.state_changed.connect(states.append)
+    controller.start_launch(["launch", "fake_driver", "fake.launch.py"])
+
+    def wait_until(predicate, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    assert wait_until(child_pid_file.exists, 2.0)
+    child_pid = int(child_pid_file.read_text().strip())
+    assert FilePath(f"/proc/{child_pid}").exists()
+    controller.stop_launch()
+    assert wait_until(
+        lambda: (
+            not controller.running
+            and not controller._group_alive()
+            and states[-1] == "stopped"),
+        5.0,
+    )
+    assert "stopping" in states
+    if FilePath(f"/proc/{child_pid}/stat").exists():
+        stat = FilePath(f"/proc/{child_pid}/stat").read_text()
+        assert stat[stat.rfind(")") + 2:].split()[0] in ("Z", "X")
 
 
 def test_navigation_and_map_processing_are_separate_workspaces():

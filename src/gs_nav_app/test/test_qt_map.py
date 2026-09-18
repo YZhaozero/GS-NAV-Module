@@ -16,8 +16,13 @@ from gs_nav_app.qt_nav_node import (  # noqa: E402
     MapPanel,
     NavigationWindow,
     QtNavRosNode,
-    SensorLaunchProcess,
 )
+from gs_nav_app.features.mapping import (  # noqa: E402
+    MAPPING_BACKENDS,
+    MappingRosAdapter,
+)
+from gs_nav_app.features.sensors import SensorPreviewRosAdapter  # noqa: E402
+from gs_nav_app.ros_launch_process import RosLaunchProcess  # noqa: E402
 from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
 from gs_nav_app.map_processing import pointcloud_to_grid  # noqa: E402
 
@@ -393,12 +398,137 @@ def test_sensor_topic_discovery_filters_supported_message_types():
                 ("/scan", ["sensor_msgs/msg/LaserScan"]),
             ]
 
-    grouped = QtNavRosNode.available_sensor_topics(FakeNode())
+    class Adapter:
+        node = FakeNode()
+
+    grouped = SensorPreviewRosAdapter.available_topics(Adapter())
     assert grouped == {
         "lidar": ["/livox/lidar", "/points"],
         "camera": ["/color/image_raw"],
         "imu": ["/imu/data"],
     }
+
+
+def test_mapping_topic_discovery_only_accepts_dlio_message_types():
+    class FakeNode:
+        def get_topic_names_and_types(self):
+            return [
+                ("/points", ["sensor_msgs/msg/PointCloud2"]),
+                ("/livox/custom", ["livox_ros_driver2/msg/CustomMsg"]),
+                ("/imu/data", ["sensor_msgs/msg/Imu"]),
+                ("/image", ["sensor_msgs/msg/Image"]),
+            ]
+
+    class Adapter:
+        node = FakeNode()
+
+    grouped = MappingRosAdapter.available_topics(Adapter())
+    assert grouped == {
+        "pointcloud": ["/points"],
+        "imu": ["/imu/data"],
+    }
+    compatible, message = MappingRosAdapter.validate_inputs(
+        Adapter(), "/livox/custom", "/imu/data")
+    assert not compatible
+    assert "PointCloud2" in message
+    compatible, _message = MappingRosAdapter.validate_inputs(
+        Adapter(), "/points", "/imu/data")
+    assert compatible
+
+
+def test_mapping_workspace_builds_dlio_launch_and_controls_preview():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+
+        def __init__(self):
+            self.mapping = FakeMappingAdapter()
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    class FakeMappingAdapter:
+        cloud_revision = 0
+        save_revision = 0
+        cloud = None
+        cloud_error = ""
+        cloud_frame = ""
+        cloud_topic = ""
+        save_status = ""
+
+        def __init__(self):
+            self.preview_started = []
+            self.preview_stopped = 0
+
+        def available_topics(self):
+            return {
+                "pointcloud": ["/robot/lidar_points"],
+                "imu": ["/robot/imu"],
+            }
+
+        def validate_inputs(self, pointcloud_topic, imu_topic):
+            return True, f"{pointcloud_topic} + {imu_topic}"
+
+        def start_preview(self, topic):
+            self.preview_started.append(topic)
+            self.cloud_topic = topic
+            return True, f"等待建图数据 {topic}"
+
+        def stop_preview(self):
+            self.preview_stopped += 1
+
+        def save_map(self, _backend, _path, _leaf_size):
+            return True, "saving"
+
+    class FakeProcess:
+        def __init__(self):
+            self.started = []
+            self.stopped = False
+
+        def start_launch(self, arguments):
+            self.started.append(arguments)
+            return True
+
+        def stop_launch(self):
+            self.stopped = True
+
+    node = FakeNode()
+    window = NavigationWindow(node)
+    window.refresh_timer.stop()
+    window.show_mapping()
+    assert window.pages.currentWidget() is window.mapping_page
+    page = window.mapping_page
+    assert page.map_panel._cloud_3d_enabled
+    assert MAPPING_BACKENDS["dlio"].package == (
+        "direct_lidar_inertial_odometry")
+    assert page.pointcloud_combo.findText(
+        "/robot/lidar_points") >= 0
+    assert page.imu_combo.findText("/robot/imu") >= 0
+
+    page.pointcloud_combo.setCurrentText("/robot/lidar_points")
+    page.imu_combo.setCurrentText("/robot/imu")
+    page.map_topic.setText("/robot/dlio/map")
+    page.use_sim_time.setChecked(True)
+    arguments = page.launch_arguments()
+    assert arguments[:3] == [
+        "launch", "direct_lidar_inertial_odometry", "dlio.launch.py"]
+    assert "pointcloud_topic:=/robot/lidar_points" in arguments
+    assert "imu_topic:=/robot/imu" in arguments
+    assert "use_sim_time:=true" in arguments
+    assert "rviz:=false" in arguments
+
+    process = FakeProcess()
+    window.mapping_controller.process = process
+    page.start_mapping()
+    assert node.mapping.preview_started[-1] == "/robot/dlio/map"
+    assert process.started[-1] == arguments
+    window.mapping_controller.stop()
+    assert process.stopped
 
 
 def test_livox_custom_message_is_converted_for_the_cloud_monitor():
@@ -409,22 +539,48 @@ def test_livox_custom_message_is_converted_for_the_cloud_monitor():
     class Message:
         points = [Point(1.0, 2.0, 3.0), Point(-1.0, 0.5, 0.25)]
 
-    class FakeNode:
-        sensor_preview_cloud = None
-        sensor_preview_errors = {"lidar": "old error"}
-        sensor_preview_revisions = {"lidar": 4}
+    class FakeAdapter:
+        cloud = None
+        errors = {"lidar": "old error"}
+        revisions = {"lidar": 4}
 
-    node = FakeNode()
-    QtNavRosNode._on_sensor_preview_livox(node, Message())
-    assert node.sensor_preview_cloud.shape == (2, 3)
-    assert np.allclose(node.sensor_preview_cloud[1], [-1.0, 0.5, 0.25])
-    assert node.sensor_preview_errors["lidar"] == ""
-    assert node.sensor_preview_revisions["lidar"] == 5
+    adapter = FakeAdapter()
+    SensorPreviewRosAdapter._on_livox(adapter, Message())
+    assert adapter.cloud.shape == (2, 3)
+    assert np.allclose(adapter.cloud[1], [-1.0, 0.5, 0.25])
+    assert adapter.errors["lidar"] == ""
+    assert adapter.revisions["lidar"] == 5
 
 
 def test_sensor_monitor_page_selects_topics_and_renders_live_data():
     app = QApplication.instance() or QApplication([])
     assert app is not None
+
+    class FakePreviewAdapter:
+        def __init__(self):
+            self.started = []
+            self.stopped = []
+            self.revisions = {"lidar": 0, "camera": 0, "imu": 0}
+            self.topics = {"lidar": "", "camera": "", "imu": ""}
+            self.errors = {"lidar": "", "camera": "", "imu": ""}
+            self.cloud = None
+            self.image = None
+            self.imu = None
+
+        def available_topics(self):
+            return {
+                "lidar": ["/livox/lidar"],
+                "camera": ["/camera/camera/color/image_raw"],
+                "imu": ["/camera/camera/imu"],
+            }
+
+        def start(self, kind, topic):
+            self.started.append((kind, topic))
+            self.topics[kind] = topic
+            return True, f"正在订阅 {topic}"
+
+        def stop(self, kind=None):
+            self.stopped.append(kind)
 
     class FakeNode:
         navigation_status = "ready"
@@ -432,32 +588,7 @@ def test_sensor_monitor_page_selects_topics_and_renders_live_data():
         pointcloud_topic = ""
 
         def __init__(self):
-            self.started = []
-            self.stopped = []
-            self.sensor_preview_revisions = {
-                "lidar": 0, "camera": 0, "imu": 0}
-            self.sensor_preview_topics = {
-                "lidar": "", "camera": "", "imu": ""}
-            self.sensor_preview_errors = {
-                "lidar": "", "camera": "", "imu": ""}
-            self.sensor_preview_cloud = None
-            self.sensor_preview_image = None
-            self.sensor_preview_imu = None
-
-        def available_sensor_topics(self):
-            return {
-                "lidar": ["/livox/lidar"],
-                "camera": ["/camera/camera/color/image_raw"],
-                "imu": ["/camera/camera/imu"],
-            }
-
-        def start_sensor_preview(self, kind, topic):
-            self.started.append((kind, topic))
-            self.sensor_preview_topics[kind] = topic
-            return True, f"正在订阅 {topic}"
-
-        def stop_sensor_preview(self, kind=None):
-            self.stopped.append(kind)
+            self.sensor_preview = FakePreviewAdapter()
 
         def send_navigation_waypoints(self, waypoints):
             return bool(waypoints)
@@ -480,18 +611,18 @@ def test_sensor_monitor_page_selects_topics_and_renders_live_data():
 
     window.sensor_topic_combos["lidar"].setCurrentText("/livox/lidar")
     window._start_sensor_preview("lidar")
-    assert node.started[-1] == ("lidar", "/livox/lidar")
-    node.sensor_preview_cloud = np.array([
+    assert node.sensor_preview.started[-1] == ("lidar", "/livox/lidar")
+    node.sensor_preview.cloud = np.array([
         [0.0, 0.0, 0.0], [1.0, 2.0, 0.5],
     ], dtype=np.float32)
-    node.sensor_preview_revisions["lidar"] += 1
+    node.sensor_preview.revisions["lidar"] += 1
     window._refresh_sensor_previews()
     assert len(window.sensor_preview_cloud_panel._cloud_source_points) == 2
     assert "2 点" in window.sensor_preview_status_labels["lidar"].text()
 
     window.sensor_topic_combos["imu"].setCurrentText("/camera/camera/imu")
     window._start_sensor_preview("imu")
-    node.sensor_preview_imu = {
+    node.sensor_preview.imu = {
         "frame_id": "camera_imu_optical_frame",
         "stamp": (12, 345),
         "orientation": (0.0, 0.0, 0.0, 1.0),
@@ -501,7 +632,7 @@ def test_sensor_monitor_page_selects_topics_and_renders_live_data():
         "angular_velocity_covariance": (0.0,) * 9,
         "linear_acceleration_covariance": (0.0,) * 9,
     }
-    node.sensor_preview_revisions["imu"] += 1
+    node.sensor_preview.revisions["imu"] += 1
     window._refresh_sensor_previews()
     imu_text = window.sensor_preview_imu_text.toPlainText()
     assert "camera_imu_optical_frame" in imu_text
@@ -509,7 +640,7 @@ def test_sensor_monitor_page_selects_topics_and_renders_live_data():
     assert "Linear acceleration" in imu_text
 
     window.leave_sensor_monitor()
-    assert node.stopped[-1] is None
+    assert node.sensor_preview.stopped[-1] is None
     assert window.pages.currentWidget() is window.sensor_tools_page
 
 
@@ -531,7 +662,7 @@ def test_sensor_stop_terminates_the_complete_launch_process_group(
     monkeypatch.setenv("FAKE_SENSOR_CHILD_PID", str(child_pid_file))
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
 
-    controller = SensorLaunchProcess("测试传感器")
+    controller = RosLaunchProcess("测试传感器")
     states = []
     controller.state_changed.connect(states.append)
     controller.start_launch(["launch", "fake_driver", "fake.launch.py"])

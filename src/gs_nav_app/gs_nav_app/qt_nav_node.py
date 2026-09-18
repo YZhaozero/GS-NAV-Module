@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 import signal
 import sys
@@ -17,9 +16,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateThroughPoses
 from nav_msgs.msg import OccupancyGrid, Path
 from PyQt5.QtCore import (
-    QObject,
     QPointF,
-    QProcess,
     QRectF,
     Qt,
     QTimer,
@@ -68,13 +65,8 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
-
-try:
-    from livox_ros_driver2.msg import CustomMsg as LivoxCustomMsg
-except ImportError:  # The app can still monitor standard PointCloud2 sensors.
-    LivoxCustomMsg = None
 
 from .map_processing import (
     GridMap,
@@ -98,6 +90,17 @@ from .nav_math import (
     project_optical,
     transform_matrix,
 )
+from .features.mapping import (
+    MappingController,
+    MappingRosAdapter,
+    UnavailableMappingRosAdapter,
+)
+from .features.sensors import (
+    SensorDriverController,
+    SensorPreviewRosAdapter,
+    UnavailableSensorPreviewAdapter,
+)
+from .ui.mapping_page import MappingPage
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -227,192 +230,6 @@ class CameraPanel(QWidget):
         state = "相机在线 · 全局路径" if self._camera_live else "等待相机数据"
         painter.drawText(
             card.adjusted(17, 34, -10, -7), Qt.AlignLeft | Qt.AlignVCenter, state)
-
-
-class SensorLaunchProcess(QObject):
-    """Own one ros2 launch process and expose its combined output to Qt."""
-
-    log_received = pyqtSignal(str)
-    state_changed = pyqtSignal(str)
-
-    def __init__(self, display_name: str, parent=None) -> None:
-        super().__init__(parent)
-        self.display_name = display_name
-        self._requested_stop = False
-        self._process_group_id: Optional[int] = None
-        self.process = QProcess(self)
-        self.process.setProcessChannelMode(QProcess.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self._read_output)
-        self.process.started.connect(self._on_started)
-        self.process.finished.connect(self._on_finished)
-        self.process.errorOccurred.connect(self._on_error)
-
-    @property
-    def running(self) -> bool:
-        return self.process.state() != QProcess.NotRunning
-
-    def start_launch(self, arguments) -> bool:
-        if self.running:
-            self.log_received.emit(f"{self.display_name}已经在运行\n")
-            return False
-        command = "ros2 " + " ".join(str(value) for value in arguments)
-        self.log_received.emit(f"$ {command}\n")
-        self._requested_stop = False
-        self._process_group_id = None
-        self.state_changed.emit("starting")
-        # Start every launch in its own session.  Signalling only the outer
-        # ``ros2 launch`` process leaves driver nodes behind; a dedicated
-        # process group lets Stop reliably reach the whole launch tree.
-        self.process.start(
-            "setsid", ["ros2", *[str(value) for value in arguments]])
-        return True
-
-    def stop_launch(self) -> None:
-        if not self.running:
-            self.log_received.emit(f"{self.display_name}当前未运行\n")
-            self.state_changed.emit("stopped")
-            return
-        self.log_received.emit(f"正在停止{self.display_name}…\n")
-        self._requested_stop = True
-        self.state_changed.emit("stopping")
-        self._capture_process_group()
-        self._signal_process_group(signal.SIGINT)
-        QTimer.singleShot(1800, self._terminate_if_alive)
-
-    def shutdown(self) -> None:
-        if not self.running and not self._group_alive():
-            return
-        self._requested_stop = True
-        self._capture_process_group()
-        self._signal_process_group(signal.SIGINT)
-        if not self.process.waitForFinished(1500):
-            self._signal_process_group(signal.SIGTERM)
-            self.process.waitForFinished(700)
-        if self._group_alive():
-            self._signal_process_group(signal.SIGKILL)
-            self.process.waitForFinished(500)
-        self._finish_stopping()
-
-    def _capture_process_group(self) -> None:
-        if self._process_group_id is None:
-            process_id = int(self.process.processId())
-            if process_id > 0:
-                self._process_group_id = process_id
-
-    def _on_started(self) -> None:
-        self._capture_process_group()
-        self.state_changed.emit("running")
-
-    def _group_alive(self) -> bool:
-        group_id = self._process_group_id
-        if group_id is None:
-            return False
-        group_seen = False
-        try:
-            for entry in os.scandir("/proc"):
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    stat = FilePath(entry.path, "stat").read_text()
-                    fields = stat[stat.rfind(")") + 2:].split()
-                    if len(fields) > 2 and int(fields[2]) == group_id:
-                        group_seen = True
-                        if fields[0] not in ("Z", "X"):
-                            return True
-                except (OSError, ValueError):
-                    continue
-            if group_seen:
-                # Zombies have already stopped executing and only await reaping.
-                return False
-        except OSError:
-            pass
-        try:
-            os.killpg(group_id, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-
-    def _signal_process_group(self, signal_number: int) -> None:
-        self._capture_process_group()
-        if self._process_group_id is not None:
-            try:
-                os.killpg(self._process_group_id, signal_number)
-                return
-            except ProcessLookupError:
-                return
-            except PermissionError:
-                pass
-        if self.running:
-            if signal_number == signal.SIGKILL:
-                self.process.kill()
-            else:
-                self.process.terminate()
-
-    def _terminate_if_alive(self) -> None:
-        if not self._requested_stop:
-            return
-        if self._group_alive() or self.running:
-            self.log_received.emit(
-                f"{self.display_name}仍在退出，正在终止整个进程组…\n")
-            self._signal_process_group(signal.SIGTERM)
-        QTimer.singleShot(1500, self._kill_if_alive)
-
-    def _kill_if_alive(self) -> None:
-        if not self._requested_stop:
-            return
-        if self._group_alive() or self.running:
-            self.log_received.emit(
-                f"{self.display_name}仍有残留进程，正在强制结束整个进程组…\n")
-            self._signal_process_group(signal.SIGKILL)
-        QTimer.singleShot(150, self._finish_stopping)
-
-    def _finish_stopping(self) -> None:
-        if not self._requested_stop:
-            return
-        if self._group_alive():
-            self.log_received.emit(
-                f"{self.display_name}进程组尚未完全退出，将再次强制清理…\n")
-            self._signal_process_group(signal.SIGKILL)
-            QTimer.singleShot(200, self._finish_stopping)
-            return
-        self._requested_stop = False
-        self._process_group_id = None
-        self.log_received.emit(f"\n{self.display_name}进程已完全停止\n")
-        self.state_changed.emit("stopped")
-
-    def _read_output(self) -> None:
-        data = bytes(self.process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace")
-        if data:
-            self.log_received.emit(data)
-
-    def _on_finished(self, exit_code: int, _exit_status) -> None:
-        self._read_output()
-        if self._requested_stop:
-            if not self._group_alive():
-                self._finish_stopping()
-            return
-        if self._group_alive():
-            self.log_received.emit(
-                f"\n{self.display_name}主进程已结束，但检测到残留子进程，正在清理…\n")
-            self._requested_stop = True
-            self.state_changed.emit("stopping")
-            self._signal_process_group(signal.SIGTERM)
-            QTimer.singleShot(1000, self._kill_if_alive)
-            return
-        self._process_group_id = None
-        self.log_received.emit(
-            f"\n{self.display_name}进程已结束（退出码 {exit_code}）\n")
-        self.state_changed.emit("stopped")
-
-    def _on_error(self, error) -> None:
-        if self._requested_stop and error == QProcess.Crashed:
-            return
-        self.log_received.emit(
-            f"{self.display_name}进程错误：{self.process.errorString()} ({error})\n")
-        self.state_changed.emit("error")
 
 
 class MapPanel(QWidget):
@@ -1568,6 +1385,8 @@ class QtNavRosNode(Node):
                 self._on_pointcloud, sensor_qos)
         self.navigation_client = ActionClient(
             self, NavigateThroughPoses, "/navigate_through_poses")
+        self.mapping = MappingRosAdapter(self)
+        self.sensor_preview = SensorPreviewRosAdapter(self)
 
         self.latest_image: Optional[np.ndarray] = None
         self.camera_frame = ""
@@ -1584,29 +1403,6 @@ class QtNavRosNode(Node):
         self.latest_pointcloud: Optional[np.ndarray] = None
         self.pointcloud_frame = self.map_frame
         self.pointcloud_revision = 0
-        self.sensor_preview_image: Optional[np.ndarray] = None
-        self.sensor_preview_cloud: Optional[np.ndarray] = None
-        self.sensor_preview_imu = None
-        self.sensor_preview_revisions = {
-            "camera": 0,
-            "lidar": 0,
-            "imu": 0,
-        }
-        self.sensor_preview_topics = {
-            "camera": "",
-            "lidar": "",
-            "imu": "",
-        }
-        self.sensor_preview_errors = {
-            "camera": "",
-            "lidar": "",
-            "imu": "",
-        }
-        self._sensor_preview_subscriptions = {
-            "camera": None,
-            "lidar": None,
-            "imu": None,
-        }
         self.navigation_status = "请在地图上添加至少一个途径点"
         self.navigation_active = False
         self.navigation_result_status: Optional[int] = None
@@ -1616,134 +1412,6 @@ class QtNavRosNode(Node):
             f"Qt navigation ready: camera={self.camera_topic}, "
             f"camera_info={self.camera_info_topic}, map={self.map_topic}, "
             f"path={self.path_topic}, action=/navigate_through_poses")
-
-    def available_sensor_topics(self):
-        """Return live ROS topics grouped by supported sensor message type."""
-        type_to_kind = {
-            "sensor_msgs/msg/PointCloud2": "lidar",
-            "livox_ros_driver2/msg/CustomMsg": "lidar",
-            "sensor_msgs/msg/Image": "camera",
-            "sensor_msgs/msg/Imu": "imu",
-        }
-        grouped = {"lidar": [], "camera": [], "imu": []}
-        for topic_name, topic_types in self.get_topic_names_and_types():
-            for topic_type in topic_types:
-                kind = type_to_kind.get(topic_type)
-                if kind is not None:
-                    grouped[kind].append(topic_name)
-                    break
-        for topics in grouped.values():
-            topics.sort()
-        return grouped
-
-    def start_sensor_preview(self, kind: str, topic: str):
-        """Create or replace one temporary sensor-monitor subscription."""
-        message_types = {
-            "lidar": PointCloud2,
-            "camera": Image,
-            "imu": Imu,
-        }
-        callbacks = {
-            "lidar": self._on_sensor_preview_cloud,
-            "camera": self._on_sensor_preview_image,
-            "imu": self._on_sensor_preview_imu,
-        }
-        if kind not in message_types:
-            return False, f"不支持的传感器类型：{kind}"
-        topic = str(topic).strip()
-        if not topic:
-            return False, "请选择或输入话题"
-        if kind == "lidar":
-            topic_types = []
-            try:
-                topic_types = dict(self.get_topic_names_and_types()).get(
-                    topic, [])
-            except RuntimeError:
-                pass
-            if "livox_ros_driver2/msg/CustomMsg" in topic_types:
-                if LivoxCustomMsg is None:
-                    return False, "当前环境缺少 livox_ros_driver2/CustomMsg"
-                message_types[kind] = LivoxCustomMsg
-                callbacks[kind] = self._on_sensor_preview_livox
-        self.stop_sensor_preview(kind)
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=2,
-        )
-        try:
-            subscription = self.create_subscription(
-                message_types[kind], topic, callbacks[kind], qos)
-        except (RuntimeError, ValueError) as exc:
-            self.sensor_preview_errors[kind] = str(exc)
-            return False, f"订阅失败：{exc}"
-        self._sensor_preview_subscriptions[kind] = subscription
-        self.sensor_preview_topics[kind] = topic
-        self.sensor_preview_errors[kind] = ""
-        return True, f"正在订阅 {topic}"
-
-    def stop_sensor_preview(self, kind: Optional[str] = None) -> None:
-        """Destroy one or all temporary sensor-monitor subscriptions."""
-        kinds = tuple(self._sensor_preview_subscriptions) if kind is None else (kind,)
-        for sensor_kind in kinds:
-            subscription = self._sensor_preview_subscriptions.get(sensor_kind)
-            if subscription is not None:
-                self.destroy_subscription(subscription)
-                self._sensor_preview_subscriptions[sensor_kind] = None
-            if sensor_kind in self.sensor_preview_topics:
-                self.sensor_preview_topics[sensor_kind] = ""
-
-    def _on_sensor_preview_image(self, msg: Image) -> None:
-        try:
-            self.sensor_preview_image = image_to_bgr(msg)
-            self.sensor_preview_errors["camera"] = ""
-            self.sensor_preview_revisions["camera"] += 1
-        except (ValueError, TypeError) as exc:
-            self.sensor_preview_errors["camera"] = f"图像格式错误：{exc}"
-
-    def _on_sensor_preview_cloud(self, msg: PointCloud2) -> None:
-        try:
-            self.sensor_preview_cloud = pointcloud2_to_xyz(msg)
-            self.sensor_preview_errors["lidar"] = ""
-            self.sensor_preview_revisions["lidar"] += 1
-        except (ValueError, TypeError) as exc:
-            self.sensor_preview_errors["lidar"] = f"点云格式错误：{exc}"
-
-    def _on_sensor_preview_livox(self, msg) -> None:
-        try:
-            self.sensor_preview_cloud = np.asarray([
-                (point.x, point.y, point.z) for point in msg.points
-            ], dtype=np.float32).reshape(-1, 3)
-            self.sensor_preview_errors["lidar"] = ""
-            self.sensor_preview_revisions["lidar"] += 1
-        except (AttributeError, TypeError, ValueError) as exc:
-            self.sensor_preview_errors["lidar"] = (
-                f"Livox 点云格式错误：{exc}")
-
-    def _on_sensor_preview_imu(self, msg: Imu) -> None:
-        self.sensor_preview_imu = {
-            "frame_id": msg.header.frame_id,
-            "stamp": (msg.header.stamp.sec, msg.header.stamp.nanosec),
-            "orientation": (
-                msg.orientation.x, msg.orientation.y,
-                msg.orientation.z, msg.orientation.w,
-            ),
-            "angular_velocity": (
-                msg.angular_velocity.x, msg.angular_velocity.y,
-                msg.angular_velocity.z,
-            ),
-            "linear_acceleration": (
-                msg.linear_acceleration.x, msg.linear_acceleration.y,
-                msg.linear_acceleration.z,
-            ),
-            "orientation_covariance": tuple(msg.orientation_covariance),
-            "angular_velocity_covariance": tuple(
-                msg.angular_velocity_covariance),
-            "linear_acceleration_covariance": tuple(
-                msg.linear_acceleration_covariance),
-        }
-        self.sensor_preview_errors["imu"] = ""
-        self.sensor_preview_revisions["imu"] += 1
 
     def _on_image(self, msg: Image) -> None:
         try:
@@ -2100,17 +1768,18 @@ class NavigationWindow(QMainWindow):
         self._rendered_grid_edit_revision = -1
         self._rendered_cloud_edit_revision = -1
         self._undo_stack = []
-        self.sensor_processes = {}
+        self.sensor_driver_controller = SensorDriverController(self)
+        self.sensor_processes = self.sensor_driver_controller.processes
+        self.sensor_preview_adapter = getattr(
+            node, "sensor_preview", UnavailableSensorPreviewAdapter())
         self.sensor_state_labels = {}
         self.sensor_start_buttons = {}
         self.sensor_stop_buttons = {}
         self.sensor_log_views = {}
         self.sensor_topic_combos = {}
         self.sensor_preview_status_labels = {}
-        self.last_sensor_preview_revisions = dict(getattr(
-            node, "sensor_preview_revisions",
-            {"lidar": 0, "camera": 0, "imu": 0},
-        ))
+        self.last_sensor_preview_revisions = dict(
+            self.sensor_preview_adapter.revisions)
         self.setWindowTitle("GS Navigation Console")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
@@ -2148,6 +1817,10 @@ class NavigationWindow(QMainWindow):
         self.open_sensor_tools_button.setObjectName("workspaceButton")
         self.open_sensor_tools_button.clicked.connect(self.show_sensor_tools)
         header.addWidget(self.open_sensor_tools_button)
+        self.open_mapping_button = QPushButton("建图")
+        self.open_mapping_button.setObjectName("workspaceButton")
+        self.open_mapping_button.clicked.connect(self.show_mapping)
+        header.addWidget(self.open_mapping_button)
         self.open_map_tools_button = QPushButton("地图处理")
         self.open_map_tools_button.setObjectName("workspaceButton")
         self.open_map_tools_button.clicked.connect(self.show_map_tools)
@@ -2272,11 +1945,20 @@ class NavigationWindow(QMainWindow):
         self.map_tools_page = self._build_map_tools_page()
         self.sensor_tools_page = self._build_sensor_tools_page()
         self.sensor_monitor_page = self._build_sensor_monitor_page()
+        mapping_adapter = getattr(
+            self.node, "mapping", UnavailableMappingRosAdapter())
+        self.mapping_controller = MappingController(
+            mapping_adapter, parent=self)
+        self.mapping_page = MappingPage(
+            self.mapping_controller, MapPanel)
+        self.mapping_page.return_requested.connect(
+            self.show_navigation_setup)
         self.pages = QStackedWidget()
         self.pages.addWidget(self.setup_page)
         self.pages.addWidget(self.map_tools_page)
         self.pages.addWidget(self.sensor_tools_page)
         self.pages.addWidget(self.sensor_monitor_page)
+        self.pages.addWidget(self.mapping_page)
         self.pages.addWidget(self.active_page)
         self.setCentralWidget(self.pages)
         self.setStyleSheet(self._style_sheet())
@@ -2354,13 +2036,11 @@ class NavigationWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
 
-        for key, display_name in (("lidar", "雷达"), ("camera", "相机")):
-            controller = SensorLaunchProcess(display_name, self)
-            controller.log_received.connect(
-                lambda text, sensor=key: self._append_sensor_log(sensor, text))
-            controller.state_changed.connect(
-                lambda state, sensor=key: self._handle_sensor_state(sensor, state))
-            self.sensor_processes[key] = controller
+        self.sensor_driver_controller.log_received.connect(
+            self._append_sensor_log)
+        self.sensor_driver_controller.state_changed.connect(
+            self._handle_sensor_state)
+        for key in ("lidar", "camera"):
             self._handle_sensor_state(key, "stopped")
         return root
 
@@ -2610,41 +2290,29 @@ class NavigationWindow(QMainWindow):
         layout.addWidget(self._sensor_action_row("camera", "相机启动"))
         return root
 
-    @staticmethod
-    def _launch_bool(value: bool) -> str:
-        return "true" if value else "false"
-
     def _lidar_launch_arguments(self):
-        arguments = [
-            "launch", "livox_ros_driver2", "msg_MID360_launch.py",
-            f"xfer_format:={self.lidar_xfer_format.currentData()}",
-            f"multi_topic:={int(self.lidar_multi_topic.isChecked())}",
-            f"publish_freq:={self.lidar_publish_frequency.value():g}",
-            f"frame_id:={self.lidar_frame_id.text().strip() or 'livox_frame'}",
-        ]
-        config_path = self.lidar_config_path.text().strip()
-        if config_path:
-            arguments.append(f"user_config_path:={config_path}")
-        return arguments
+        return self.sensor_driver_controller.lidar_launch_arguments(
+            self.lidar_xfer_format.currentData(),
+            self.lidar_multi_topic.isChecked(),
+            self.lidar_publish_frequency.value(),
+            self.lidar_frame_id.text(),
+            self.lidar_config_path.text(),
+        )
 
     def _camera_launch_arguments(self):
-        arguments = [
-            "launch", "realsense2_camera", "d435i.launch.py",
-            f"camera_name:={self.camera_name_input.text().strip() or 'camera'}",
-            f"camera_namespace:={self.camera_namespace_input.text().strip() or 'camera'}",
-            f"enable_color:={self._launch_bool(self.camera_enable_color.isChecked())}",
-            f"enable_depth:={self._launch_bool(self.camera_enable_depth.isChecked())}",
-            f"enable_gyro:={self._launch_bool(self.camera_enable_gyro.isChecked())}",
-            f"enable_accel:={self._launch_bool(self.camera_enable_accel.isChecked())}",
-            f"unite_imu_method:={self.camera_unite_imu.currentData()}",
-            f"enable_sync:={self._launch_bool(self.camera_enable_sync.isChecked())}",
-            f"align_depth.enable:={self._launch_bool(self.camera_align_depth.isChecked())}",
-            f"pointcloud.enable:={self._launch_bool(self.camera_pointcloud.isChecked())}",
-        ]
-        serial = self.camera_serial_input.text().strip()
-        if serial:
-            arguments.append(f"serial_no:={serial}")
-        return arguments
+        return self.sensor_driver_controller.camera_launch_arguments(
+            self.camera_name_input.text(),
+            self.camera_namespace_input.text(),
+            self.camera_serial_input.text(),
+            self.camera_enable_color.isChecked(),
+            self.camera_enable_depth.isChecked(),
+            self.camera_enable_gyro.isChecked(),
+            self.camera_enable_accel.isChecked(),
+            self.camera_unite_imu.currentData(),
+            self.camera_enable_sync.isChecked(),
+            self.camera_align_depth.isChecked(),
+            self.camera_pointcloud.isChecked(),
+        )
 
     def _choose_lidar_config(self) -> None:
         path, _selected = QFileDialog.getOpenFileName(
@@ -2657,10 +2325,10 @@ class NavigationWindow(QMainWindow):
         builder = (
             self._lidar_launch_arguments
             if key == "lidar" else self._camera_launch_arguments)
-        self.sensor_processes[key].start_launch(builder())
+        self.sensor_driver_controller.start(key, builder())
 
     def _stop_sensor(self, key: str) -> None:
-        self.sensor_processes[key].stop_launch()
+        self.sensor_driver_controller.stop(key)
 
     def _handle_sensor_state(self, key: str, state: str) -> None:
         labels = {
@@ -3062,6 +2730,11 @@ class NavigationWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             self.map_status.setText(f"自动加载点云失败：{exc}")
 
+    def show_mapping(self) -> None:
+        """Open the standalone online mapping workspace."""
+        self.mapping_page.activate()
+        self.pages.setCurrentWidget(self.mapping_page)
+
     def show_map_tools(self) -> None:
         """Open the standalone map processing workspace."""
         self.pages.setCurrentWidget(self.map_tools_page)
@@ -3077,8 +2750,7 @@ class NavigationWindow(QMainWindow):
 
     def leave_sensor_monitor(self) -> None:
         """Release preview-only subscriptions and return to driver control."""
-        if hasattr(self.node, "stop_sensor_preview"):
-            self.node.stop_sensor_preview()
+        self.sensor_preview_adapter.stop()
         for kind in ("lidar", "camera", "imu"):
             self._clear_sensor_preview(kind)
         self.pages.setCurrentWidget(self.sensor_tools_page)
@@ -3086,21 +2758,20 @@ class NavigationWindow(QMainWindow):
     def refresh_sensor_topics(self) -> None:
         """Populate selectors from the ROS graph while preserving manual text."""
         grouped = {"lidar": [], "camera": [], "imu": []}
-        if hasattr(self.node, "available_sensor_topics"):
-            try:
-                discovered = self.node.available_sensor_topics()
-                for kind in grouped:
-                    grouped[kind] = list(discovered.get(kind, ()))
-            except (RuntimeError, TypeError, ValueError) as exc:
-                for label in self.sensor_preview_status_labels.values():
-                    label.setText(f"读取 ROS 2 话题失败：{exc}")
-                return
+        try:
+            discovered = self.sensor_preview_adapter.available_topics()
+            for kind in grouped:
+                grouped[kind] = list(discovered.get(kind, ()))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            for label in self.sensor_preview_status_labels.values():
+                label.setText(f"读取 ROS 2 话题失败：{exc}")
+            return
         configured = {
             "camera": str(getattr(self.node, "camera_topic", "")),
             "lidar": str(getattr(self.node, "pointcloud_topic", "")),
             "imu": "",
         }
-        active_topics = getattr(self.node, "sensor_preview_topics", {})
+        active_topics = self.sensor_preview_adapter.topics
         for kind, combo in self.sensor_topic_combos.items():
             current = combo.currentText().strip()
             candidates = list(grouped[kind])
@@ -3125,14 +2796,10 @@ class NavigationWindow(QMainWindow):
     def _start_sensor_preview(self, kind: str) -> None:
         combo = self.sensor_topic_combos[kind]
         topic = combo.currentText().strip()
-        if not hasattr(self.node, "start_sensor_preview"):
-            self.sensor_preview_status_labels[kind].setText(
-                "当前 ROS 节点不支持动态传感器订阅")
-            return
         self._clear_sensor_preview(kind, topic)
-        success, status = self.node.start_sensor_preview(kind, topic)
+        success, status = self.sensor_preview_adapter.start(kind, topic)
         self.sensor_preview_status_labels[kind].setText(status)
-        revisions = getattr(self.node, "sensor_preview_revisions", {})
+        revisions = self.sensor_preview_adapter.revisions
         self.last_sensor_preview_revisions[kind] = int(
             revisions.get(kind, 0))
         if success:
@@ -3140,8 +2807,7 @@ class NavigationWindow(QMainWindow):
             self.sensor_monitor_tabs.setCurrentIndex(tab_indexes[kind])
 
     def _stop_sensor_preview(self, kind: str) -> None:
-        if hasattr(self.node, "stop_sensor_preview"):
-            self.node.stop_sensor_preview(kind)
+        self.sensor_preview_adapter.stop(kind)
         self._clear_sensor_preview(kind)
         self.sensor_preview_status_labels[kind].setText("已停止显示")
 
@@ -3195,9 +2861,9 @@ class NavigationWindow(QMainWindow):
     def _refresh_sensor_previews(self) -> None:
         if self.pages.currentWidget() is not self.sensor_monitor_page:
             return
-        revisions = getattr(self.node, "sensor_preview_revisions", {})
-        errors = getattr(self.node, "sensor_preview_errors", {})
-        topics = getattr(self.node, "sensor_preview_topics", {})
+        revisions = self.sensor_preview_adapter.revisions
+        errors = self.sensor_preview_adapter.errors
+        topics = self.sensor_preview_adapter.topics
         for kind in ("lidar", "camera", "imu"):
             error = errors.get(kind, "")
             if error:
@@ -3208,14 +2874,14 @@ class NavigationWindow(QMainWindow):
             self.last_sensor_preview_revisions[kind] = revision
             topic = topics.get(kind, "")
             if kind == "lidar":
-                cloud = getattr(self.node, "sensor_preview_cloud", None)
+                cloud = self.sensor_preview_adapter.cloud
                 if cloud is not None:
                     self.sensor_preview_cloud_panel.set_pointcloud(cloud)
                     self.sensor_preview_cloud_panel.set_display_mode("cloud")
                     self.sensor_preview_status_labels[kind].setText(
                         f"正在显示 {topic} · {len(cloud):,} 点")
             elif kind == "camera":
-                image = getattr(self.node, "sensor_preview_image", None)
+                image = self.sensor_preview_adapter.image
                 if image is not None:
                     self.sensor_preview_camera_panel.set_frame(
                         image, None, 0.0)
@@ -3223,7 +2889,7 @@ class NavigationWindow(QMainWindow):
                     self.sensor_preview_status_labels[kind].setText(
                         f"正在显示 {topic} · {width}×{height}")
             else:
-                data = getattr(self.node, "sensor_preview_imu", None)
+                data = self.sensor_preview_adapter.imu
                 if data is not None:
                     self.sensor_preview_imu_text.setPlainText(
                         self._format_imu_data(data))
@@ -3848,6 +3514,8 @@ class NavigationWindow(QMainWindow):
     def refresh(self) -> None:
         self._handle_navigation_terminal_state()
         self._refresh_sensor_previews()
+        if self.pages.currentWidget() is self.mapping_page:
+            self.mapping_page.refresh()
         image = self.node.latest_image
         route = None
         if image is not None:
@@ -3897,10 +3565,9 @@ class NavigationWindow(QMainWindow):
         """Stop child launch processes before closing the desktop app."""
         self.refresh_timer.stop()
         self.navigation_return_timer.stop()
-        for controller in self.sensor_processes.values():
-            controller.shutdown()
-        if hasattr(self.node, "stop_sensor_preview"):
-            self.node.stop_sensor_preview()
+        self.sensor_driver_controller.shutdown()
+        self.mapping_controller.shutdown()
+        self.sensor_preview_adapter.stop()
         super().closeEvent(event)
 
 

@@ -18,6 +18,7 @@
 - 提供独立的传感器管理页，可配置、启动和停止 Livox MID360 与 RealSense D435i；
 - 雷达、相机及合并日志实时显示在界面中，关闭软件时自动回收已启动的驱动进程；
 - 传感器数据页可按消息类型选择 ROS 2 话题，监看三维点云、相机视频和 IMU 数值；
+- 提供独立建图页，当前可直接启动/停止 DLIO、查看实时三维地图并调用服务保存 PCD；
 - 导航设置页以地图为主、相机为辅，可在栅格地图与交互式三维点云之间即时切换；
 - 有相机内参和 TF 时执行真实针孔投影，尚未标定时自动回退到可调地面投影。
 
@@ -92,6 +93,44 @@ launch，不启动 HTTP 服务：
 source install/setup.bash
 ros2 launch gs_nav_app ar_nav.launch.py
 ```
+
+## 独立建图
+
+导航页右上角点击“建图”进入 `GS MAPPING STUDIO`。建图和导航、地图后处理分别处于
+独立工作区；返回导航不会终止正在运行的建图任务，必须点击“停止建图”或关闭软件。
+当前后端为工作空间内的 `direct_lidar_inertial_odometry`（DLIO）：
+
+- 雷达输入只列出 `sensor_msgs/msg/PointCloud2`，IMU 输入只列出
+  `sensor_msgs/msg/Imu`，也可以手动填写话题；
+- 默认输入为 `/livox/lidar/pointcloud` 和 `/livox/imu`，默认实时地图为
+  `/dlio/map_node/map`；
+- 页面中央实时显示 DLIO 输出的三维点云，支持鼠标旋转、平移、缩放；
+- 可选择 `use_sim_time` 和是否额外启动 RViz，右侧显示完整 launch 日志；
+- “保存当前 PCD”调用 `/save_pcd`，按设置的体素大小在目标目录生成
+  `dlio_map.pcd`。
+
+DLIO 本身要求 PointCloud2。若 Livox 驱动当前使用 `CustomMsg`，请先在“传感器管理”
+中把雷达“输出格式”切到 `PointCloud2`，再启动建图。界面会阻止已知类型不匹配的话题，
+避免进程正常启动却始终收不到点云。
+
+建图算法入口集中在 `features/mapping.py` 的 `MAPPING_BACKENDS`。后续接入其他 SLAM 时，
+注册包名、launch 文件、参数名、地图输出话题与保存适配器即可复用同一套页面、进程组
+回收、日志和三维预览，不需要改动导航或地图处理页面。
+
+## 代码结构
+
+界面外壳不再直接实现新功能的 ROS 和进程逻辑，主要模块划分如下：
+
+- `qt_nav_node.py`：导航 ROS 节点、主窗口和页面切换；
+- `features/mapping.py`：建图后端定义、ROS 点云/保存适配器和建图控制器；
+- `ui/mapping_page.py`：建图页面，只渲染控制器状态并转发用户操作；
+- `features/sensors.py`：传感器驱动控制、启动参数生成和实时话题订阅；
+- `ros_launch_process.py`：所有功能共用的完整 launch 进程组启停与日志管理；
+- `map_processing.py`：PCD/PLY、栅格转换及地图文件处理；
+- `nav_math.py`：导航路径投影与几何计算。
+
+新增功能时应建立自己的功能控制器；新增页面只依赖该控制器，不在主窗口中直接创建
+ROS 订阅、服务客户端或子进程。这样算法、ROS 接口和 Qt 页面可以分别测试和替换。
 
 ## 本地地图处理
 

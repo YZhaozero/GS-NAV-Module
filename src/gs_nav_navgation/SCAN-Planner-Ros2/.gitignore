@@ -1,0 +1,38 @@
+# ROS 2 / colcon build products
+/build/
+/install/
+/log/
+/devel/
+/.colcon/
+/compile_commands.json
+
+# ROS runtime state
+/.ros/
+*.bag
+*.db3
+*.mcap
+
+# Python cache and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system files
+/.vscode/
+/.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll

@@ -1,0 +1,10 @@
+closed_loop_controller:
+  ros__parameters:
+    time_forward: 0.8
+    heading_error_threshold: 0.8
+    kp_pos: 0.8
+    kp_yaw: 1.5
+    max_vx: 0.75
+    max_vy: 0.35
+    max_vyaw: 1.0
+    finish_dist: 0.15

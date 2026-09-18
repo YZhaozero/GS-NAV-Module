@@ -186,13 +186,28 @@ class SensorDriverController(QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.processes = {}
+        self.states = {"lidar": "stopped", "camera": "stopped"}
+        self.log_events = []
         for key, label in (("lidar", "雷达"), ("camera", "相机")):
             process = RosLaunchProcess(label, self)
             process.log_received.connect(
-                lambda text, sensor=key: self.log_received.emit(sensor, text))
+                lambda text, sensor=key: self.append_log(sensor, text))
             process.state_changed.connect(
-                lambda state, sensor=key: self.state_changed.emit(sensor, state))
+                lambda state, sensor=key: self._record_state(sensor, state))
             self.processes[key] = process
+
+    def append_log(self, key: str, text: str) -> None:
+        """Persist a driver/diagnostic message and forward it to every view."""
+        if not text:
+            return
+        self.log_events.append((key, text))
+        if len(self.log_events) > 6000:
+            del self.log_events[:1000]
+        self.log_received.emit(key, text)
+
+    def _record_state(self, key: str, state: str) -> None:
+        self.states[key] = state
+        self.state_changed.emit(key, state)
 
     @staticmethod
     def lidar_launch_arguments(

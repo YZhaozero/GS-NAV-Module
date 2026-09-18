@@ -79,7 +79,7 @@ class MappingPage(QWidget):
         refresh_button.setObjectName("secondaryButton")
         refresh_button.clicked.connect(self.refresh_topics)
         header.addWidget(refresh_button)
-        back_button = QPushButton("返回导航")
+        back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.return_requested.emit)
         header.addWidget(back_button)

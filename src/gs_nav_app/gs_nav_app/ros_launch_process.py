@@ -32,6 +32,11 @@ class RosLaunchProcess(QObject):
     def running(self) -> bool:
         return self.process.state() != QProcess.NotRunning
 
+    @property
+    def active(self) -> bool:
+        """Include orphaned descendants whose launch parent already exited."""
+        return self.running or self._group_alive()
+
     def start_launch(self, arguments) -> bool:
         if self.running:
             self.log_received.emit(f"{self.display_name}已经在运行\n")
@@ -46,7 +51,7 @@ class RosLaunchProcess(QObject):
         return True
 
     def stop_launch(self) -> None:
-        if not self.running:
+        if not self.active:
             self.log_received.emit(f"{self.display_name}当前未运行\n")
             self.state_changed.emit("stopped")
             return
@@ -182,7 +187,7 @@ class RosLaunchProcess(QObject):
         self._process_group_id = None
         self.log_received.emit(
             f"\n{self.display_name}进程已结束（退出码 {exit_code}）\n")
-        self.state_changed.emit("stopped")
+        self.state_changed.emit("stopped" if exit_code == 0 else "error")
 
     def _on_error(self, error) -> None:
         if self._requested_stop and error == QProcess.Crashed:

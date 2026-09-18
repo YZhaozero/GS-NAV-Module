@@ -5,7 +5,7 @@ odom_topic: /dlio/odom_node/odom
 map_frame: map
 local_frame: odom
 update_hz: 1.0
-default_map_path: /home/zy/ws/car_simple_sim/src/car_localization/localizer/PCD/dilo_map.pcd
+default_map_path: /home/zy/ws/GS-NAV-Module/src/gs_nav_map/gs_map_20260918_105125_413.pcd
 
 # 粗配准参数 - 快速估计大致位置
 rough_scan_resolution: 0.2
@@ -42,7 +42,7 @@ teaser_tuple_scale: 0.95
 
 # Scan Context 配置
 use_scan_context: true
-sc_database_path: "/home/zy/ws/car_simple_sim/src/car_localization/localizer/sc_db"
+sc_database_path: "/home/zy/ws/GS-NAV-Module/src/gs_nav_localization/localizer/sc_db"
 sc_dist_thresh: 0.5         # 匹配阈值，0.3-0.6 之间调节
 sc_max_radius: 80.0
 sc_num_rings: 20

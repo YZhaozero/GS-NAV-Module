@@ -139,29 +139,29 @@ public:
     void loadParameters()
     {
         this->declare_parameter("config_path", "");
+        this->declare_parameter("default_map_path", "");
+        this->declare_parameter("cloud_topic", "");
+        this->declare_parameter("odom_topic", "");
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
 
-        if (config_path.empty())
+        if (!config_path.empty())
         {
-            RCLCPP_WARN(this->get_logger(), "config_path not provided; using defaults");
-            return;
-        }
+          YAML::Node config = YAML::LoadFile(config_path);
+          if (!config)
+          {
+              RCLCPP_WARN(this->get_logger(), "FAIL TO LOAD YAML FILE!");
+          }
+          else
+          {
+            RCLCPP_INFO(this->get_logger(), "LOAD FROM YAML CONFIG PATH: %s", config_path.c_str());
 
-        YAML::Node config = YAML::LoadFile(config_path);
-        if (!config)
-        {
-            RCLCPP_WARN(this->get_logger(), "FAIL TO LOAD YAML FILE!");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "LOAD FROM YAML CONFIG PATH: %s", config_path.c_str());
-
-        if (config["cloud_topic"]) m_config.cloud_topic = config["cloud_topic"].as<std::string>();
-        if (config["odom_topic"]) m_config.odom_topic = config["odom_topic"].as<std::string>();
-        if (config["map_frame"]) m_config.map_frame = config["map_frame"].as<std::string>();
-        if (config["local_frame"]) m_config.local_frame = config["local_frame"].as<std::string>();
-        if (config["update_hz"]) m_config.update_hz = config["update_hz"].as<double>();
-        if (config["default_map_path"]) m_config.default_map_path = config["default_map_path"].as<std::string>();
+            if (config["cloud_topic"]) m_config.cloud_topic = config["cloud_topic"].as<std::string>();
+            if (config["odom_topic"]) m_config.odom_topic = config["odom_topic"].as<std::string>();
+            if (config["map_frame"]) m_config.map_frame = config["map_frame"].as<std::string>();
+            if (config["local_frame"]) m_config.local_frame = config["local_frame"].as<std::string>();
+            if (config["update_hz"]) m_config.update_hz = config["update_hz"].as<double>();
+            if (config["default_map_path"]) m_config.default_map_path = config["default_map_path"].as<std::string>();
 
         // ICP参数
         if (config["rough_scan_resolution"]) m_localizer_config.rough_scan_resolution = config["rough_scan_resolution"].as<double>();
@@ -215,11 +215,29 @@ public:
             RCLCPP_INFO(this->get_logger(), "  - 仅使用TEASER++: %s", teaser_only ? "是" : "否");
         }
         
-        if (m_localizer_config.use_scan_context) {
+            if (m_localizer_config.use_scan_context) {
              RCLCPP_INFO(this->get_logger(), "Scan Context 回环检测: 启用");
              RCLCPP_INFO(this->get_logger(), "  - 距离阈值: %.2f", m_localizer_config.sc_dist_thresh);
              RCLCPP_INFO(this->get_logger(), "  - 最大半径: %.2f m", m_localizer_config.sc_max_radius);
+            }
+          }
         }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "config_path not provided; using defaults");
+        }
+
+        std::string override_map_path;
+        std::string override_cloud_topic;
+        std::string override_odom_topic;
+        this->get_parameter("default_map_path", override_map_path);
+        this->get_parameter("cloud_topic", override_cloud_topic);
+        this->get_parameter("odom_topic", override_odom_topic);
+        if (!override_map_path.empty()) m_config.default_map_path = override_map_path;
+        if (!override_cloud_topic.empty()) m_config.cloud_topic = override_cloud_topic;
+        if (!override_odom_topic.empty()) m_config.odom_topic = override_odom_topic;
+
+        RCLCPP_INFO(this->get_logger(), "Localization map: %s", m_config.default_map_path.c_str());
     }
 
     // 修改timerCB函数中的匹配逻辑

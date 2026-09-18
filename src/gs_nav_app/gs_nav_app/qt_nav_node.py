@@ -6,6 +6,7 @@ import math
 import re
 import signal
 import sys
+import time
 from pathlib import Path as FilePath
 from typing import Optional, Tuple
 
@@ -96,12 +97,14 @@ from .features.mapping import (
     MappingRosAdapter,
     UnavailableMappingRosAdapter,
 )
+from .features.navigation_stack import NavigationStackController
 from .features.sensors import (
     SensorDriverController,
     SensorPreviewRosAdapter,
     UnavailableSensorPreviewAdapter,
 )
 from .ui.mapping_page import MappingPage
+from .ui.navigation_stack_page import NavigationStackPage
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -1356,6 +1359,8 @@ class QtNavRosNode(Node):
             self.get_parameter("pointcloud_topic").value)
         self.map_storage_dir = default_map_directory(str(
             self.get_parameter("map_storage_dir").value))
+        self._last_camera_message_time = 0.0
+        self._last_lidar_message_time = 0.0
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -1377,6 +1382,9 @@ class QtNavRosNode(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(
             Image, self.camera_topic, self._on_image, sensor_qos)
+        self.create_subscription(
+            PointCloud2, "/livox/lidar/pointcloud",
+            self._on_navigation_lidar_data, sensor_qos)
         self.create_subscription(
             CameraInfo, self.camera_info_topic, self._on_camera_info, sensor_qos)
         self.create_subscription(
@@ -1421,6 +1429,7 @@ class QtNavRosNode(Node):
         try:
             self.latest_image = image_to_bgr(msg)
             self.camera_frame = self.camera_frame_override or msg.header.frame_id
+            self._last_camera_message_time = time.monotonic()
         except (ValueError, TypeError) as exc:
             self.navigation_status = f"相机格式错误: {exc}"
 
@@ -1429,6 +1438,17 @@ class QtNavRosNode(Node):
         if matrix[0, 0] > 0 and matrix[1, 1] > 0:
             self.camera_matrix = matrix
             self.camera_info_size = (msg.width, msg.height)
+
+    def _on_navigation_lidar_data(self, _msg: PointCloud2) -> None:
+        self._last_lidar_message_time = time.monotonic()
+
+    def navigation_sensor_data_active(self, key: str) -> bool:
+        """Return true only when real sensor messages arrived recently."""
+        last_message = {
+            "lidar": self._last_lidar_message_time,
+            "camera": self._last_camera_message_time,
+        }.get(key, 0.0)
+        return last_message > 0.0 and time.monotonic() - last_message < 2.0
 
     def _on_path(self, msg: Path) -> None:
         if not self.navigation_active:
@@ -1777,6 +1797,11 @@ class NavigationWindow(QMainWindow):
         self._undo_stack = []
         self.sensor_driver_controller = SensorDriverController(self)
         self.sensor_processes = self.sensor_driver_controller.processes
+        self.navigation_stack_controller = NavigationStackController(
+            self.sensor_driver_controller,
+            sensor_active=self._navigation_sensor_active,
+            parent=self,
+        )
         self.sensor_preview_adapter = getattr(
             node, "sensor_preview", UnavailableSensorPreviewAdapter())
         self.sensor_state_labels = {}
@@ -1787,7 +1812,7 @@ class NavigationWindow(QMainWindow):
         self.sensor_preview_status_labels = {}
         self.last_sensor_preview_revisions = dict(
             self.sensor_preview_adapter.revisions)
-        self.setWindowTitle("GS Navigation Console")
+        self.setWindowTitle("GS AR Navigation Console")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
         self._build_ui()
@@ -1810,7 +1835,7 @@ class NavigationWindow(QMainWindow):
         layout.setSpacing(14)
 
         header = QHBoxLayout()
-        title = QLabel("GS NAVIGATION")
+        title = QLabel("GS AR NAVIGATION")
         title.setObjectName("title")
         subtitle = QLabel("实时相机 · 栅格地图 · Nav2 全局导航")
         subtitle.setObjectName("subtitle")
@@ -1820,6 +1845,11 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+        self.open_navigation_stack_button = QPushButton("导航系统")
+        self.open_navigation_stack_button.setObjectName("primaryButton")
+        self.open_navigation_stack_button.clicked.connect(
+            self.show_navigation_stack)
+        header.addWidget(self.open_navigation_stack_button)
         self.open_sensor_tools_button = QPushButton("传感器管理")
         self.open_sensor_tools_button.setObjectName("workspaceButton")
         self.open_sensor_tools_button.clicked.connect(self.show_sensor_tools)
@@ -1952,6 +1982,14 @@ class NavigationWindow(QMainWindow):
         self.map_tools_page = self._build_map_tools_page()
         self.sensor_tools_page = self._build_sensor_tools_page()
         self.sensor_monitor_page = self._build_sensor_monitor_page()
+        self.navigation_stack_page = NavigationStackPage(
+            self.navigation_stack_controller,
+            self.map_storage_dir,
+            self._lidar_launch_arguments,
+            self._camera_launch_arguments,
+        )
+        self.navigation_stack_page.return_requested.connect(
+            self.show_navigation_setup)
         mapping_adapter = getattr(
             self.node, "mapping", UnavailableMappingRosAdapter())
         self.mapping_controller = MappingController(
@@ -1965,6 +2003,7 @@ class NavigationWindow(QMainWindow):
         self.pages.addWidget(self.map_tools_page)
         self.pages.addWidget(self.sensor_tools_page)
         self.pages.addWidget(self.sensor_monitor_page)
+        self.pages.addWidget(self.navigation_stack_page)
         self.pages.addWidget(self.mapping_page)
         self.pages.addWidget(self.active_page)
         self.setCentralWidget(self.pages)
@@ -1991,7 +2030,7 @@ class NavigationWindow(QMainWindow):
         monitor_button.setObjectName("primaryButton")
         monitor_button.clicked.connect(self.show_sensor_monitor)
         header.addWidget(monitor_button)
-        back_button = QPushButton("返回导航")
+        back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.show_navigation_setup)
         header.addWidget(back_button)
@@ -2201,7 +2240,7 @@ class NavigationWindow(QMainWindow):
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lidar_xfer_format = QComboBox()
-        self.lidar_xfer_format.addItem("Livox CustomMsg", 4)
+        self.lidar_xfer_format.addItem("PointCloud2 + CustomMsg", 4)
         self.lidar_xfer_format.addItem("PointCloud2", 0)
         form.addRow("输出格式", self.lidar_xfer_format)
         self.lidar_publish_frequency = QDoubleSpinBox()
@@ -2388,7 +2427,7 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
-        back_button = QPushButton("返回导航")
+        back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.show_navigation_setup)
         header.addWidget(back_button)
@@ -2742,13 +2781,27 @@ class NavigationWindow(QMainWindow):
         self.mapping_page.activate()
         self.pages.setCurrentWidget(self.mapping_page)
 
+    def show_navigation_stack(self) -> None:
+        """Open the complete navigation runtime launcher."""
+        self.navigation_stack_page.activate()
+        self.pages.setCurrentWidget(self.navigation_stack_page)
+
     def show_map_tools(self) -> None:
         """Open the standalone map processing workspace."""
         self.pages.setCurrentWidget(self.map_tools_page)
 
     def show_sensor_tools(self) -> None:
         """Open the standalone sensor driver workspace."""
+        self._sync_sensor_driver_history()
         self.pages.setCurrentWidget(self.sensor_tools_page)
+
+    def _sync_sensor_driver_history(self) -> None:
+        for view in self.sensor_log_views.values():
+            view.clear()
+        for key, text in self.sensor_driver_controller.log_events:
+            self._append_sensor_log(key, text)
+        for key, state in self.sensor_driver_controller.states.items():
+            self._handle_sensor_state(key, state)
 
     def show_sensor_monitor(self) -> None:
         """Open live sensor views and refresh compatible ROS topics."""
@@ -2904,8 +2957,13 @@ class NavigationWindow(QMainWindow):
                         f"正在显示 {topic} · 已接收 {revision:,} 帧")
 
     def show_navigation_setup(self) -> None:
-        """Return to navigation without starting or cancelling a task."""
+        """Return to AR navigation without starting or cancelling a task."""
         self.pages.setCurrentWidget(self.setup_page)
+
+    def _navigation_sensor_active(self, key: str) -> bool:
+        """Use message freshness, not process/topic existence, as readiness."""
+        checker = getattr(self.node, "navigation_sensor_data_active", None)
+        return bool(checker(key)) if callable(checker) else False
 
     def set_navigation_map_mode(self, mode: str) -> None:
         """Set map type for navigation setup and the active mini-map only."""
@@ -3573,6 +3631,7 @@ class NavigationWindow(QMainWindow):
         """Stop child launch processes before closing the desktop app."""
         self.refresh_timer.stop()
         self.navigation_return_timer.stop()
+        self.navigation_stack_controller.shutdown()
         self.sensor_driver_controller.shutdown()
         self.mapping_controller.shutdown()
         self.sensor_preview_adapter.stop()

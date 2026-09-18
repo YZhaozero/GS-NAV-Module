@@ -23,6 +23,9 @@
   <exec_depend>livox_ros_driver2</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>direct_lidar_inertial_odometry</exec_depend>
+  <exec_depend>pointcloud_to_laserscan</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>localizer</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

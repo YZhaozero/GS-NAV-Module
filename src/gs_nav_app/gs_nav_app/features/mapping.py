@@ -9,6 +9,7 @@ save adapter when required.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -65,6 +66,24 @@ MAPPING_BACKENDS = {
 }
 
 
+def unique_map_path(
+    directory: Path, map_name: str, now: Optional[datetime] = None,
+) -> Path:
+    """Return a timestamped PCD path that never replaces an existing map."""
+    raw_name = Path(str(map_name).strip()).stem
+    safe_name = "".join(
+        character if character.isalnum() or character in ("-", "_") else "_"
+        for character in raw_name
+    ).strip("_-") or "gs_map"
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    candidate = directory / f"{safe_name}_{timestamp}.pcd"
+    suffix = 1
+    while candidate.exists():
+        candidate = directory / f"{safe_name}_{timestamp}_{suffix:02d}.pcd"
+        suffix += 1
+    return candidate
+
+
 class MappingRosAdapter:
     """Own all ROS subscriptions and services required by mapping features."""
 
@@ -77,6 +96,9 @@ class MappingRosAdapter:
         self.cloud_revision = 0
         self.save_status = ""
         self.save_revision = 0
+        self.save_in_progress = False
+        self.last_saved_path: Optional[Path] = None
+        self._pending_save_path: Optional[Path] = None
         self._cloud_subscription = None
         self._dlio_save_client = (
             node.create_client(DlioSavePCD, "/save_pcd")
@@ -147,11 +169,21 @@ class MappingRosAdapter:
         except (ValueError, TypeError) as exc:
             self.cloud_error = f"建图点云格式错误：{exc}"
 
-    def save_map(self, backend: MappingBackend, save_path: str, leaf_size: float):
+    def save_map(
+        self,
+        backend: MappingBackend,
+        save_path: str,
+        map_name: str,
+        leaf_size: float,
+    ):
         if backend.save_adapter != "dlio_save_pcd":
             return False, "当前建图算法尚未配置地图保存接口"
         if DlioSavePCD is None or self._dlio_save_client is None:
             return False, "未找到 DLIO SavePCD 服务类型，请先构建并 source 工作空间"
+        if self.save_in_progress:
+            return False, "上一次地图仍在保存，请稍候"
+        if self.cloud is None or len(self.cloud) == 0:
+            return False, "当前还没有可保存的地图点云，请等待 DLIO 产生关键帧"
         raw_path = str(save_path).strip()
         if not raw_path:
             return False, "请选择地图保存目录"
@@ -160,26 +192,52 @@ class MappingRosAdapter:
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return False, f"无法创建保存目录：{exc}"
-        if not self._dlio_save_client.service_is_ready():
+        if (
+            not self._dlio_save_client.service_is_ready()
+            and not self._dlio_save_client.wait_for_service(timeout_sec=0.25)
+        ):
             return False, (
                 f"保存服务 {backend.save_service} 尚未就绪，请先启动建图")
+        output_path = unique_map_path(target.resolve(), map_name)
         request = DlioSavePCD.Request()
         request.leaf_size = float(leaf_size)
-        request.save_path = str(target.resolve())
-        self.save_status = "正在保存 DLIO 点云地图…"
-        future = self._dlio_save_client.call_async(request)
+        request.save_path = str(output_path)
+        self._pending_save_path = output_path
+        self.save_in_progress = True
+        self.save_status = f"正在保存：{output_path.name}"
+        try:
+            future = self._dlio_save_client.call_async(request)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self.save_in_progress = False
+            self._pending_save_path = None
+            return False, f"调用地图保存服务失败：{exc}"
         future.add_done_callback(self._on_save_done)
         return True, self.save_status
 
     def _on_save_done(self, future) -> None:
+        output_path = self._pending_save_path
         try:
             response = future.result()
-            if response is not None and response.success:
-                self.save_status = "地图保存完成：dlio_map.pcd"
+            if (
+                response is not None
+                and response.success
+                and output_path is not None
+                and output_path.is_file()
+                and output_path.stat().st_size > 0
+            ):
+                self.last_saved_path = output_path
+                self.save_status = f"地图保存完成：{output_path}"
+            elif response is not None and response.success:
+                self.save_status = (
+                    "DLIO 返回成功，但没有找到有效文件："
+                    f"{output_path or '(unknown)'}")
             else:
-                self.save_status = "DLIO 返回保存失败"
+                self.save_status = (
+                    f"DLIO 返回保存失败：{output_path or '(unknown)'}")
         except Exception as exc:  # rclpy future transports errors here.
             self.save_status = f"地图保存失败：{exc}"
+        self.save_in_progress = False
+        self._pending_save_path = None
         self.save_revision += 1
 
 
@@ -193,6 +251,8 @@ class UnavailableMappingRosAdapter:
     cloud_revision = 0
     save_status = ""
     save_revision = 0
+    save_in_progress = False
+    last_saved_path = None
 
     def available_topics(self):
         return {"pointcloud": [], "imu": []}
@@ -206,7 +266,9 @@ class UnavailableMappingRosAdapter:
     def stop_preview(self) -> None:
         pass
 
-    def save_map(self, _backend, _save_path: str, _leaf_size: float):
+    def save_map(
+        self, _backend, _save_path: str, _map_name: str, _leaf_size: float,
+    ):
         return False, "当前节点未启用建图保存接口"
 
 
@@ -297,8 +359,9 @@ class MappingController(QObject):
     def stop(self) -> None:
         self.process.stop_launch()
 
-    def save_map(self, save_path: str, leaf_size: float):
-        return self.ros.save_map(self.backend, save_path, leaf_size)
+    def save_map(self, save_path: str, map_name: str, leaf_size: float):
+        return self.ros.save_map(
+            self.backend, save_path, map_name, leaf_size)
 
     def shutdown(self) -> None:
         self.process.shutdown()

@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 from pathlib import Path as FilePath
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -20,7 +21,9 @@ from gs_nav_app.qt_nav_node import (  # noqa: E402
 from gs_nav_app.features.mapping import (  # noqa: E402
     MAPPING_BACKENDS,
     MappingRosAdapter,
+    unique_map_path,
 )
+import gs_nav_app.features.mapping as mapping_feature  # noqa: E402
 from gs_nav_app.features.sensors import SensorPreviewRosAdapter  # noqa: E402
 from gs_nav_app.ros_launch_process import RosLaunchProcess  # noqa: E402
 from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
@@ -436,6 +439,66 @@ def test_mapping_topic_discovery_only_accepts_dlio_message_types():
     assert compatible
 
 
+def test_mapping_save_uses_unique_timestamped_file_and_verifies_output(
+    tmp_path, monkeypatch,
+):
+    fixed_time = datetime(2026, 9, 18, 12, 34, 56, 789000)
+    first = unique_map_path(tmp_path, "factory map", fixed_time)
+    assert first.name == "factory_map_20260918_123456_789.pcd"
+    first.write_bytes(b"existing map")
+    second = unique_map_path(tmp_path, "factory map", fixed_time)
+    assert second.name == "factory_map_20260918_123456_789_01.pcd"
+
+    class FakeSavePCD:
+        class Request:
+            leaf_size = 0.0
+            save_path = ""
+
+    class Response:
+        success = True
+
+    class Future:
+        def result(self):
+            return Response()
+
+        def add_done_callback(self, callback):
+            callback(self)
+
+    class Client:
+        request = None
+
+        def service_is_ready(self):
+            return True
+
+        def wait_for_service(self, timeout_sec):
+            del timeout_sec
+            return True
+
+        def call_async(self, request):
+            self.request = request
+            FilePath(request.save_path).write_bytes(b"valid pcd data")
+            return Future()
+
+    monkeypatch.setattr(mapping_feature, "DlioSavePCD", FakeSavePCD)
+    adapter = MappingRosAdapter.__new__(MappingRosAdapter)
+    adapter.cloud = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    adapter.save_status = ""
+    adapter.save_revision = 0
+    adapter.save_in_progress = False
+    adapter.last_saved_path = None
+    adapter._pending_save_path = None
+    adapter._dlio_save_client = Client()
+    success, status = adapter.save_map(
+        MAPPING_BACKENDS["dlio"], str(tmp_path), "factory map", 0.2)
+    assert success
+    assert adapter.last_saved_path is not None
+    assert adapter.last_saved_path.is_file()
+    assert adapter.last_saved_path.name.startswith("factory_map_")
+    assert adapter.last_saved_path != first
+    assert str(adapter.last_saved_path) in status
+    assert adapter.save_revision == 1
+
+
 def test_mapping_workspace_builds_dlio_launch_and_controls_preview():
     app = QApplication.instance() or QApplication([])
     assert app is not None
@@ -460,6 +523,7 @@ def test_mapping_workspace_builds_dlio_launch_and_controls_preview():
         cloud_frame = ""
         cloud_topic = ""
         save_status = ""
+        save_in_progress = False
 
         def __init__(self):
             self.preview_started = []
@@ -482,7 +546,7 @@ def test_mapping_workspace_builds_dlio_launch_and_controls_preview():
         def stop_preview(self):
             self.preview_stopped += 1
 
-        def save_map(self, _backend, _path, _leaf_size):
+        def save_map(self, _backend, _path, _name, _leaf_size):
             return True, "saving"
 
     class FakeProcess:

@@ -106,8 +106,10 @@ ros2 launch gs_nav_app ar_nav.launch.py
   `/dlio/map_node/map`；
 - 页面中央实时显示 DLIO 输出的三维点云，支持鼠标旋转、平移、缩放；
 - 可选择 `use_sim_time` 和是否额外启动 RViz，右侧显示完整 launch 日志；
-- “保存当前 PCD”调用 `/save_pcd`，按设置的体素大小在目标目录生成
-  `dlio_map.pcd`。
+- “保存当前 PCD”调用 `/save_pcd`，按设置的体素大小和地图名称保存；文件名自动附加
+  毫秒级时间，例如 `gs_map_20260918_123456_789.pcd`，连续保存不会覆盖旧地图；
+- 保存前会检查是否已经收到有效地图点云，服务返回后还会验证目标文件真实存在且非空，
+  最终完整路径会显示在页面和建图日志中。
 
 DLIO 本身要求 PointCloud2。若 Livox 驱动当前使用 `CustomMsg`，请先在“传感器管理”
 中把雷达“输出格式”切到 `PointCloud2`，再启动建图。界面会阻止已知类型不匹配的话题，

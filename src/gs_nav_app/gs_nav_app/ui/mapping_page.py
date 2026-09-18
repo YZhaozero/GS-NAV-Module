@@ -44,6 +44,7 @@ class MappingPage(QWidget):
     def __init__(self, controller: MappingController, map_panel_factory) -> None:
         super().__init__()
         self.controller = controller
+        self.process_state = "stopped"
         self.last_cloud_revision = controller.ros.cloud_revision
         self.last_save_revision = controller.ros.save_revision
         self._map_panel_factory = map_panel_factory
@@ -166,6 +167,9 @@ class MappingPage(QWidget):
         controls_layout.addWidget(save_title)
         save_form = QFormLayout()
         save_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.map_name = QLineEdit("gs_map")
+        self.map_name.setPlaceholderText("例如：factory_floor_1")
+        save_form.addRow("地图名称", self.map_name)
         save_row = QWidget()
         save_row_layout = QHBoxLayout(save_row)
         save_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -242,7 +246,8 @@ class MappingPage(QWidget):
         self.imu_combo.setCurrentText(backend.default_imu_topic)
         self.map_topic.setText(backend.default_map_topic)
         self.save_status.setText(
-            f"地图保存服务：{backend.save_service or '未配置'}")
+            f"地图保存服务：{backend.save_service or '未配置'}；"
+            "文件名会自动附加时间，不会覆盖旧地图")
 
     def refresh_topics(self) -> None:
         try:
@@ -296,9 +301,14 @@ class MappingPage(QWidget):
 
     def save_mapping_map(self) -> None:
         success, status = self.controller.save_map(
-            self.save_path.text().strip(), self.leaf_size.value())
+            self.save_path.text().strip(),
+            self.map_name.text().strip(),
+            self.leaf_size.value(),
+        )
         self.save_status.setText(status)
-        if not success:
+        if success:
+            self.save_button.setEnabled(False)
+        else:
             self._append_log(status + "\n")
 
     def refresh(self) -> None:
@@ -318,8 +328,10 @@ class MappingPage(QWidget):
             if ros.save_status:
                 self.save_status.setText(ros.save_status)
                 self._append_log(ros.save_status + "\n")
+            self.save_button.setEnabled(self.process_state == "running")
 
     def _handle_state(self, state: str) -> None:
+        self.process_state = state
         labels = {
             "starting": ("启动中…", "#ffd166"),
             "running": ("建图中", "#66e09a"),
@@ -334,7 +346,8 @@ class MappingPage(QWidget):
         active = state in ("starting", "running", "stopping")
         self.start_button.setEnabled(not active)
         self.stop_button.setEnabled(state in ("starting", "running"))
-        self.save_button.setEnabled(state == "running")
+        self.save_button.setEnabled(
+            state == "running" and not self.controller.ros.save_in_progress)
         self.algorithm_combo.setEnabled(not active)
         if state in ("stopped", "error") and self.controller.ros.cloud is not None:
             self.cloud_status.setText(

@@ -9,6 +9,7 @@ from typing import Callable
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -18,7 +19,9 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -29,6 +32,10 @@ from ..features.navigation_stack import (
     START_ORDER,
     NavigationStackConfig,
     NavigationStackController,
+)
+from ..features.navigation_backends import (
+    LOCALIZATION_BACKENDS,
+    NAVIGATION_BACKENDS,
 )
 
 
@@ -80,7 +87,7 @@ class NavigationStackPage(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("GS NAVIGATION SYSTEM")
         title.setObjectName("title")
-        subtitle = QLabel("传感器 · DLIO · LaserScan · Localizer · Nav2 顺序启动")
+        subtitle = QLabel("传感器 · 里程计 · 定位后端 · 导航后端顺序启动")
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -102,12 +109,14 @@ class NavigationStackPage(QWidget):
         parameters_title = QLabel("启动参数")
         parameters_title.setObjectName("sectionTitle")
         controls_layout.addWidget(parameters_title)
-        tabs = QTabWidget()
-        tabs.addTab(self._build_map_tab(), "地图与定位")
-        tabs.addTab(self._build_dlio_tab(), "DLIO")
-        tabs.addTab(self._build_laserscan_tab(), "LaserScan")
-        tabs.addTab(self._build_general_tab(), "通用")
-        controls_layout.addWidget(tabs, 1)
+        self.parameter_tabs = QTabWidget()
+        self.parameter_tabs.addTab(self._build_map_tab(), "地图")
+        self.parameter_tabs.addTab(self._build_localization_tab(), "定位")
+        self.parameter_tabs.addTab(self._build_navigation_tab(), "导航")
+        self.parameter_tabs.addTab(self._build_dlio_tab(), "DLIO")
+        self.parameter_tabs.addTab(self._build_laserscan_tab(), "LaserScan")
+        self.parameter_tabs.addTab(self._build_general_tab(), "通用")
+        controls_layout.addWidget(self.parameter_tabs, 1)
 
         sensor_hint = QLabel(
             "雷达与相机使用“传感器管理”页面中的参数；若对应驱动进程或 ROS "
@@ -129,7 +138,7 @@ class NavigationStackPage(QWidget):
         action_row.addWidget(self.stop_button)
         action_row.addWidget(self.start_button)
         controls_layout.addLayout(action_row)
-        self.action_status = QLabel("请选择导航地图和定位点云地图")
+        self.action_status = QLabel("请选择地图、定位后端和导航后端")
         self.action_status.setObjectName("statusBar")
         self.action_status.setWordWrap(True)
         controls_layout.addWidget(self.action_status)
@@ -189,16 +198,52 @@ class NavigationStackPage(QWidget):
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.navigation_map = QLineEdit(latest_map(
             self.map_storage_dir, (".yaml", ".yml")))
-        form.addRow("Nav2 导航地图", self._path_row(
+        form.addRow("导航地图", self._path_row(
             self.navigation_map, self._choose_navigation_map))
         self.localization_map = QLineEdit(latest_map(
             self.map_storage_dir, (".pcd",)))
-        form.addRow("Localizer 定位地图", self._path_row(
+        form.addRow("定位地图", self._path_row(
             self.localization_map, self._choose_localization_map))
-        self.nav2_params = QLineEdit()
-        self.nav2_params.setPlaceholderText("留空使用 nav2_bringup 默认参数")
-        form.addRow("Nav2 参数文件", self._path_row(
-            self.nav2_params, self._choose_nav2_params))
+        hint = QLabel(
+            "地图只作为独立资源配置：Nav2 使用 YAML 栅格地图，当前点云 "
+            "Localizer 使用 PCD；不需要地图的后端会忽略对应文件。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+        return tab
+
+    def _build_localization_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        selector = QFormLayout()
+        selector.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.localization_backend = QComboBox()
+        for key, backend in LOCALIZATION_BACKENDS.items():
+            self.localization_backend.addItem(backend.label, key)
+        selector.addRow("定位后端", self.localization_backend)
+        layout.addLayout(selector)
+        self.localization_backend_description = QLabel()
+        self.localization_backend_description.setObjectName("hint")
+        self.localization_backend_description.setWordWrap(True)
+        layout.addWidget(self.localization_backend_description)
+        self.localization_backend_stack = QStackedWidget()
+        self.localization_backend_stack.addWidget(
+            self._build_pointcloud_localizer_panel())
+        self.localization_backend_stack.addWidget(
+            self._build_disabled_localization_panel())
+        self.localization_backend_stack.addWidget(
+            self._build_custom_localization_panel())
+        layout.addWidget(self.localization_backend_stack, 1)
+        self.localization_backend.currentIndexChanged.connect(
+            self._update_localization_backend)
+        self._update_localization_backend(0)
+        return tab
+
+    def _build_pointcloud_localizer_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.localizer_config = QLineEdit()
         self.localizer_config.setPlaceholderText("留空使用 localizer 包内配置")
         form.addRow("Localizer 配置", self._path_row(
@@ -208,7 +253,153 @@ class NavigationStackPage(QWidget):
         self.localizer_odom_topic = QLineEdit("/dlio/odom_node/odom")
         form.addRow("定位点云话题", self.localizer_cloud_topic)
         form.addRow("定位里程计话题", self.localizer_odom_topic)
+        return panel
+
+    @staticmethod
+    def _build_disabled_localization_panel() -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        message = QLabel(
+            "定位阶段将从启动顺序中移除。适合直接使用 LIO 里程计，或定位由外部系统"
+            "提供的导航方案。")
+        message.setObjectName("hint")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        layout.addStretch(1)
+        return panel
+
+    def _build_custom_localization_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.custom_localization_package = QLineEdit()
+        self.custom_localization_launch = QLineEdit()
+        self.custom_localization_arguments = QLineEdit()
+        self.custom_localization_arguments.setPlaceholderText(
+            "map:={map} config:={config} use_sim_time:={use_sim_time}")
+        form.addRow("ROS 包名", self.custom_localization_package)
+        form.addRow("Launch 文件", self.custom_localization_launch)
+        form.addRow("附加参数", self.custom_localization_arguments)
+        hint = QLabel("支持占位符：{map}、{config}、{use_sim_time}")
+        hint.setObjectName("hint")
+        form.addRow("", hint)
+        return panel
+
+    def _build_navigation_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        selector = QFormLayout()
+        selector.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.navigation_backend = QComboBox()
+        for key, backend in NAVIGATION_BACKENDS.items():
+            self.navigation_backend.addItem(backend.label, key)
+        selector.addRow("导航后端", self.navigation_backend)
+        layout.addLayout(selector)
+        self.navigation_backend_description = QLabel()
+        self.navigation_backend_description.setObjectName("hint")
+        self.navigation_backend_description.setWordWrap(True)
+        layout.addWidget(self.navigation_backend_description)
+        self.navigation_backend_stack = QStackedWidget()
+        self.navigation_backend_stack.addWidget(self._build_nav2_panel())
+        self.navigation_backend_stack.addWidget(
+            self._scrollable(self._build_scan_planner_panel()))
+        self.navigation_backend_stack.addWidget(
+            self._build_custom_navigation_panel())
+        layout.addWidget(self.navigation_backend_stack, 1)
+        self.navigation_backend.currentIndexChanged.connect(
+            self._update_navigation_backend)
+        self._update_navigation_backend(0)
         return tab
+
+    def _build_nav2_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.nav2_params = QLineEdit()
+        self.nav2_params.setPlaceholderText("留空使用 nav2_bringup 默认参数")
+        form.addRow("Nav2 参数文件", self._path_row(
+            self.nav2_params, self._choose_nav2_params))
+        self.autostart = QCheckBox("Nav2 自动进入 Active")
+        self.autostart.setChecked(True)
+        self.nav2_rviz = QCheckBox("同时启动 Nav2 RViz")
+        form.addRow("生命周期", self.autostart)
+        form.addRow("可视化", self.nav2_rviz)
+        return panel
+
+    def _build_scan_planner_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.scan_navi_mode = QComboBox()
+        self.scan_navi_mode.addItem("1 · 单目标", 1)
+        self.scan_navi_mode.addItem("2 · 参数途径点", 2)
+        self.scan_navi_mode.addItem("3 · 外部参考路径", 3)
+        self.scan_sensor_type = QComboBox()
+        self.scan_sensor_type.addItem("激光点云", "lidar")
+        self.scan_sensor_type.addItem("深度图", "depth")
+        self.scan_body_pose_topic = QLineEdit("/dlio/odom_node/odom")
+        self.scan_sensor_pose_topic = QLineEdit("/dlio/odom_node/odom")
+        self.scan_cloud_topic = QLineEdit("/livox/lidar/pointcloud")
+        self.scan_depth_topic = QLineEdit(
+            "/camera/aligned_depth_to_color/image_raw")
+        self.scan_goal_topic = QLineEdit("/move_base_simple/goal")
+        self.scan_initial_path_topic = QLineEdit("/initial_path")
+        self.scan_cmd_vel_topic = QLineEdit("/cmd_vel")
+        self.scan_start_controller = QCheckBox("启动闭环速度控制器")
+        self.scan_start_controller.setChecked(True)
+        self.scan_cloud_is_world = QCheckBox("输入点云已经位于世界坐标系")
+        self.scan_need_extrinsic = QCheckBox("应用 SCAN 内置传感器外参")
+        self.scan_planner_params = QLineEdit()
+        self.scan_controller_params = QLineEdit()
+        self.scan_keypoints_file = QLineEdit()
+        self.scan_reference_path_file = QLineEdit()
+        form.addRow("导航模式", self.scan_navi_mode)
+        form.addRow("感知类型", self.scan_sensor_type)
+        form.addRow("机身里程计", self.scan_body_pose_topic)
+        form.addRow("传感器位姿", self.scan_sensor_pose_topic)
+        form.addRow("点云话题", self.scan_cloud_topic)
+        form.addRow("深度图话题", self.scan_depth_topic)
+        form.addRow("目标话题", self.scan_goal_topic)
+        form.addRow("参考路径话题", self.scan_initial_path_topic)
+        form.addRow("速度输出", self.scan_cmd_vel_topic)
+        form.addRow("控制器", self.scan_start_controller)
+        form.addRow("点云坐标", self.scan_cloud_is_world)
+        form.addRow("传感器外参", self.scan_need_extrinsic)
+        form.addRow("规划器参数", self._path_row(
+            self.scan_planner_params,
+            lambda: self._choose_yaml(
+                self.scan_planner_params, "选择 SCAN-Planner 参数")))
+        form.addRow("控制器参数", self._path_row(
+            self.scan_controller_params,
+            lambda: self._choose_yaml(
+                self.scan_controller_params, "选择 SCAN 控制器参数")))
+        form.addRow("模式 2 途径点", self._path_row(
+            self.scan_keypoints_file,
+            lambda: self._choose_yaml(
+                self.scan_keypoints_file, "选择 SCAN 途径点")))
+        form.addRow("模式 3 参考路径", self._path_row(
+            self.scan_reference_path_file,
+            lambda: self._choose_yaml(
+                self.scan_reference_path_file, "选择 SCAN 参考路径")))
+        return panel
+
+    def _build_custom_navigation_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.custom_navigation_package = QLineEdit()
+        self.custom_navigation_launch = QLineEdit()
+        self.custom_navigation_arguments = QLineEdit()
+        self.custom_navigation_arguments.setPlaceholderText(
+            "map:={map} params_file:={params} use_sim_time:={use_sim_time}")
+        form.addRow("ROS 包名", self.custom_navigation_package)
+        form.addRow("Launch 文件", self.custom_navigation_launch)
+        form.addRow("附加参数", self.custom_navigation_arguments)
+        hint = QLabel("支持占位符：{map}、{params}、{use_sim_time}")
+        hint.setObjectName("hint")
+        form.addRow("", hint)
+        return panel
 
     def _build_dlio_tab(self) -> QWidget:
         tab = QWidget()
@@ -247,16 +438,11 @@ class NavigationStackPage(QWidget):
         form = QFormLayout(tab)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.use_sim_time = QCheckBox("使用 /clock 仿真时间")
-        self.autostart = QCheckBox("Nav2 自动进入 Active")
-        self.autostart.setChecked(True)
-        self.nav2_rviz = QCheckBox("同时启动 Nav2 RViz")
         self.startup_interval = self._number(0.0, 10.0, 1.0)
         self.startup_interval.setSuffix(" s")
         self.sensor_timeout = self._number(1.0, 120.0, 12.0)
         self.sensor_timeout.setSuffix(" s")
         form.addRow("时间源", self.use_sim_time)
-        form.addRow("Nav2", self.autostart)
-        form.addRow("可视化", self.nav2_rviz)
         form.addRow("组件启动间隔", self.startup_interval)
         form.addRow("传感器数据超时", self.sensor_timeout)
         return tab
@@ -283,17 +469,39 @@ class NavigationStackPage(QWidget):
         layout.addWidget(choose)
         return row
 
+    @staticmethod
+    def _scrollable(widget: QWidget) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setWidget(widget)
+        return area
+
+    def _update_localization_backend(self, index: int) -> None:
+        self.localization_backend_stack.setCurrentIndex(index)
+        key = self.localization_backend.itemData(index)
+        backend = LOCALIZATION_BACKENDS.get(key)
+        self.localization_backend_description.setText(
+            backend.description if backend is not None else "")
+
+    def _update_navigation_backend(self, index: int) -> None:
+        self.navigation_backend_stack.setCurrentIndex(index)
+        key = self.navigation_backend.itemData(index)
+        backend = NAVIGATION_BACKENDS.get(key)
+        self.navigation_backend_description.setText(
+            backend.description if backend is not None else "")
+
     def _choose_navigation_map(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 Nav2 导航地图", str(self.map_storage_dir),
-            "Nav2 Map (*.yaml *.yml)")
+            self, "选择导航地图", str(self.map_storage_dir),
+            "Map Files (*.yaml *.yml *.pcd *.ply *.pgm);;All Files (*)")
         if path:
             self.navigation_map.setText(path)
 
     def _choose_localization_map(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 Localizer 定位地图", str(self.map_storage_dir),
-            "Point Cloud (*.pcd)")
+            self, "选择定位地图", str(self.map_storage_dir),
+            "Map Files (*.pcd *.ply *.yaml *.yml *.pgm);;All Files (*)")
         if path:
             self.localization_map.setText(path)
 
@@ -311,10 +519,19 @@ class NavigationStackPage(QWidget):
         if path:
             self.localizer_config.setText(path)
 
+    def _choose_yaml(self, field: QLineEdit, title: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, title, field.text() or str(self.map_storage_dir),
+            "YAML (*.yaml *.yml);;All Files (*)")
+        if path:
+            field.setText(path)
+
     def configuration(self) -> NavigationStackConfig:
         return NavigationStackConfig(
             navigation_map=self.navigation_map.text().strip(),
             localization_map=self.localization_map.text().strip(),
+            localization_backend=self.localization_backend.currentData(),
+            navigation_backend=self.navigation_backend.currentData(),
             lidar_arguments=self.lidar_arguments(),
             camera_arguments=self.camera_arguments(),
             use_sim_time=self.use_sim_time.isChecked(),
@@ -334,6 +551,36 @@ class NavigationStackPage(QWidget):
             localizer_config=self.localizer_config.text().strip(),
             nav2_params=self.nav2_params.text().strip(),
             nav2_rviz=self.nav2_rviz.isChecked(),
+            custom_localization_package=(
+                self.custom_localization_package.text().strip()),
+            custom_localization_launch=(
+                self.custom_localization_launch.text().strip()),
+            custom_localization_arguments=(
+                self.custom_localization_arguments.text().strip()),
+            custom_navigation_package=(
+                self.custom_navigation_package.text().strip()),
+            custom_navigation_launch=(
+                self.custom_navigation_launch.text().strip()),
+            custom_navigation_arguments=(
+                self.custom_navigation_arguments.text().strip()),
+            scan_navi_mode=self.scan_navi_mode.currentData(),
+            scan_sensor_type=self.scan_sensor_type.currentData(),
+            scan_body_pose_topic=self.scan_body_pose_topic.text().strip(),
+            scan_sensor_pose_topic=self.scan_sensor_pose_topic.text().strip(),
+            scan_cloud_topic=self.scan_cloud_topic.text().strip(),
+            scan_depth_topic=self.scan_depth_topic.text().strip(),
+            scan_goal_topic=self.scan_goal_topic.text().strip(),
+            scan_initial_path_topic=(
+                self.scan_initial_path_topic.text().strip()),
+            scan_cmd_vel_topic=self.scan_cmd_vel_topic.text().strip(),
+            scan_start_controller=self.scan_start_controller.isChecked(),
+            scan_cloud_is_world=self.scan_cloud_is_world.isChecked(),
+            scan_need_extrinsic=self.scan_need_extrinsic.isChecked(),
+            scan_planner_params=self.scan_planner_params.text().strip(),
+            scan_controller_params=self.scan_controller_params.text().strip(),
+            scan_keypoints_file=self.scan_keypoints_file.text().strip(),
+            scan_reference_path_file=(
+                self.scan_reference_path_file.text().strip()),
             startup_interval_ms=int(self.startup_interval.value() * 1000),
             sensor_timeout_s=self.sensor_timeout.value(),
         )
@@ -375,6 +622,7 @@ class NavigationStackPage(QWidget):
             "running": ("运行中", "#66e09a"),
             "stopping": ("停止中", "#ffd166"),
             "stopped": ("未启动", "#91a2ad"),
+            "disabled": ("已禁用", "#71828e"),
             "error": ("失败", "#ff7f88"),
         }
         text, color = labels.get(state, (state, "#91a2ad"))

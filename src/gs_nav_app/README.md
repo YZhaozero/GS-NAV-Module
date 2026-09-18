@@ -103,14 +103,17 @@ AR 导航主界面右上角的“导航系统”页面用于启动完整运行�
 2. RealSense D435i 相机；
 3. DLIO 里程计；
 4. PointCloud2 转 LaserScan；
-5. 点云 Localizer；
-6. Nav2 Bringup。
+5. 定位后端（默认点云 Localizer）；
+6. 导航后端（默认 Nav2 Bringup）。
 
 雷达或相机已经通过“传感器管理”启动，或者 ROS 图中已检测到对应数据话题时，会跳过
 重复启动。传感器状态以最近收到的真实消息为准，不再仅以驱动进程或话题名称判断；未上电
-时会停留在“等待数据”，超时后中止后续启动。页面可分别选择 Localizer 使用的 PCD 定位地图、Nav2 使用的 YAML 栅格地图，
-并可设置 DLIO 输入话题、LaserScan 参数、Localizer 输入话题、Nav2 参数文件、仿真时钟
-及自动激活，也可以选择随 Nav2 启动 RViz。日志按系统和六个组件分别显示并跨页面保留；
+时会停留在“等待数据”，超时后中止后续启动。启动参数已经拆分为“地图 / 定位 / 导航 /
+DLIO / LaserScan / 通用”六个独立页签。地图页只管理地图资源；定位页可选择点云
+Localizer、不启动定位或自定义定位 launch；导航页可选择 Nav2、SCAN-Planner 或自定义
+导航 launch。默认组合仍是 Localizer + Nav2，并分别使用 PCD 定位地图和 YAML 栅格地图。
+选择“不启动定位 + SCAN-Planner”时不强制要求这两种地图。日志按系统和六个组件分别
+显示并跨页面保留；
 任一中间 launch 异常退出都会中止启动队列。“停止整套系统”会回收软件当前管理的全部
 六组进程，包括先在“传感器管理”页面启动的雷达和相机；每个 launch 都按独立进程组发送
 INT、TERM、KILL 三级退出信号，父 launch 提前退出时也会继续清理其残留子进程。由外部
@@ -154,12 +157,19 @@ DLIO 本身要求 PointCloud2。若 Livox 驱动当前使用 `CustomMsg`，请�
 - `features/mapping.py`：建图后端定义、ROS 点云/保存适配器和建图控制器；
 - `ui/mapping_page.py`：建图页面，只渲染控制器状态并转发用户操作；
 - `features/sensors.py`：传感器驱动控制、启动参数生成和实时话题订阅；
+- `features/navigation_backends.py`：定位与导航后端定义、参数校验和 launch 命令生成；
+- `features/navigation_stack.py`：与具体定位/导航算法解耦的顺序启动和生命周期控制；
 - `ros_launch_process.py`：所有功能共用的完整 launch 进程组启停与日志管理；
 - `map_processing.py`：PCD/PLY、栅格转换及地图文件处理；
 - `nav_math.py`：导航路径投影与几何计算。
 
 新增功能时应建立自己的功能控制器；新增页面只依赖该控制器，不在主窗口中直接创建
 ROS 订阅、服务客户端或子进程。这样算法、ROS 接口和 Qt 页面可以分别测试和替换。
+
+接入新的定位或导航算法时，在 `features/navigation_backends.py` 中实现 `LaunchBackend`，
+注册到 `LOCALIZATION_BACKENDS` 或 `NAVIGATION_BACKENDS`，再为它补充独立参数面板即可。
+自定义 launch 入口也可以直接在界面填写包名、launch 文件和附加参数；定位参数支持
+`{map}/{config}/{use_sim_time}`，导航参数支持 `{map}/{params}/{use_sim_time}` 占位符。
 
 ## 本地地图处理
 

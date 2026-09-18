@@ -789,6 +789,15 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     assert window.map_tools_page.isAncestorOf(window.load_cloud_button)
     assert window.open_navigation_stack_button.text() == "导航系统"
     assert window.navigation_stack_page.log_tabs.count() == 8
+    assert [
+        window.navigation_stack_page.parameter_tabs.tabText(index)
+        for index in range(window.navigation_stack_page.parameter_tabs.count())
+    ] == ["地图", "定位", "导航", "DLIO", "LaserScan", "通用"]
+    assert window.navigation_stack_page.localization_backend.currentData() == (
+        "pointcloud_localizer")
+    assert window.navigation_stack_page.navigation_backend.currentData() == "nav2"
+    assert window.navigation_stack_page.navigation_backend.findData(
+        "scan_planner") >= 0
     assert not window.navigation_stack_page.nav2_rviz.isChecked()
 
     window.sensor_driver_controller.append_log("lidar", "雷达数据等待诊断\n")

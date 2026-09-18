@@ -60,6 +60,46 @@ def test_invalid_or_swapped_maps_are_rejected(tmp_path):
     assert "YAML" in message
 
 
+def test_scan_planner_can_run_without_map_or_localization_backend(tmp_path):
+    config = make_config(
+        tmp_path,
+        navigation_map="",
+        localization_map="",
+        localization_backend="disabled",
+        navigation_backend="scan_planner",
+    )
+    valid, message = validate_navigation_stack(config)
+    assert valid, message
+    launches = build_navigation_launches(config)
+    assert "localizer" not in launches
+    assert launches["nav2"][:3] == [
+        "launch", "scan_planner", "run.launch.py"]
+    assert "navi_mode:=1" in launches["nav2"]
+    assert "cloud_topic:=/livox/lidar/pointcloud" in launches["nav2"]
+
+
+def test_custom_backends_expand_resource_placeholders(tmp_path):
+    config = make_config(
+        tmp_path,
+        localization_backend="custom",
+        navigation_backend="custom",
+        custom_localization_package="alternate_localizer",
+        custom_localization_launch="start.launch.py",
+        custom_localization_arguments="map:={map} clock:={use_sim_time}",
+        custom_navigation_package="alternate_navigation",
+        custom_navigation_launch="navigation.launch.py",
+        custom_navigation_arguments="map:={map} params:={params}",
+    )
+    valid, message = validate_navigation_stack(config)
+    assert valid, message
+    launches = build_navigation_launches(config)
+    assert launches["localizer"][:3] == [
+        "launch", "alternate_localizer", "start.launch.py"]
+    assert f"map:={config.localization_map}" in launches["localizer"]
+    assert launches["nav2"][:3] == [
+        "launch", "alternate_navigation", "navigation.launch.py"]
+
+
 def test_ordered_start_skips_sensors_that_are_already_online(
     tmp_path, monkeypatch,
 ):

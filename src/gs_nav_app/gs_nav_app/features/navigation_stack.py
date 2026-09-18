@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 import time
 from typing import Callable, Dict, List, Sequence, Tuple
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from ..ros_launch_process import RosLaunchProcess
+from .navigation_backends import (
+    LOCALIZATION_BACKENDS,
+    NAVIGATION_BACKENDS,
+    launch_bool,
+)
 
 
 COMPONENT_LABELS = {
@@ -17,8 +21,8 @@ COMPONENT_LABELS = {
     "camera": "RealSense 相机",
     "dlio": "DLIO 里程计",
     "laserscan": "点云转 LaserScan",
-    "localizer": "点云定位",
-    "nav2": "Nav2 导航",
+    "localizer": "定位后端",
+    "nav2": "导航后端",
 }
 
 START_ORDER = ("lidar", "camera", "dlio", "laserscan", "localizer", "nav2")
@@ -30,6 +34,8 @@ class NavigationStackConfig:
 
     navigation_map: str
     localization_map: str
+    localization_backend: str = "pointcloud_localizer"
+    navigation_backend: str = "nav2"
     lidar_arguments: Sequence[str] = field(default_factory=tuple)
     camera_arguments: Sequence[str] = field(default_factory=tuple)
     use_sim_time: bool = False
@@ -49,28 +55,46 @@ class NavigationStackConfig:
     localizer_config: str = ""
     nav2_params: str = ""
     nav2_rviz: bool = False
+    custom_localization_package: str = ""
+    custom_localization_launch: str = ""
+    custom_localization_arguments: str = ""
+    custom_navigation_package: str = ""
+    custom_navigation_launch: str = ""
+    custom_navigation_arguments: str = ""
+    scan_navi_mode: int = 1
+    scan_sensor_type: str = "lidar"
+    scan_body_pose_topic: str = "/dlio/odom_node/odom"
+    scan_sensor_pose_topic: str = "/dlio/odom_node/odom"
+    scan_cloud_topic: str = "/livox/lidar/pointcloud"
+    scan_depth_topic: str = "/camera/aligned_depth_to_color/image_raw"
+    scan_goal_topic: str = "/move_base_simple/goal"
+    scan_initial_path_topic: str = "/initial_path"
+    scan_cmd_vel_topic: str = "/cmd_vel"
+    scan_start_controller: bool = True
+    scan_cloud_is_world: bool = False
+    scan_need_extrinsic: bool = False
+    scan_planner_params: str = ""
+    scan_controller_params: str = ""
+    scan_keypoints_file: str = ""
+    scan_reference_path_file: str = ""
     startup_interval_ms: int = 1000
     sensor_timeout_s: float = 12.0
 
 
 def validate_navigation_stack(config: NavigationStackConfig) -> Tuple[bool, str]:
     """Validate files and coupled numeric parameters before any process starts."""
-    navigation_map = Path(config.navigation_map).expanduser()
-    localization_map = Path(config.localization_map).expanduser()
-    if not navigation_map.is_file():
-        return False, f"Nav2 导航地图不存在：{navigation_map}"
-    if navigation_map.suffix.lower() not in (".yaml", ".yml"):
-        return False, "Nav2 导航地图必须是 YAML 文件"
-    if not localization_map.is_file():
-        return False, f"Localizer 定位地图不存在：{localization_map}"
-    if localization_map.suffix.lower() != ".pcd":
-        return False, "Localizer 定位地图必须是 PCD 文件"
-    for label, optional_path in (
-        ("Nav2 参数文件", config.nav2_params),
-        ("Localizer 配置文件", config.localizer_config),
-    ):
-        if optional_path.strip() and not Path(optional_path).expanduser().is_file():
-            return False, f"{label}不存在：{optional_path}"
+    localization = LOCALIZATION_BACKENDS.get(config.localization_backend)
+    if localization is None:
+        return False, f"未知定位后端：{config.localization_backend}"
+    navigation = NAVIGATION_BACKENDS.get(config.navigation_backend)
+    if navigation is None:
+        return False, f"未知导航后端：{config.navigation_backend}"
+    valid, message = localization.validate(config)
+    if not valid:
+        return valid, message
+    valid, message = navigation.validate(config)
+    if not valid:
+        return valid, message
     if config.min_height >= config.max_height:
         return False, "LaserScan 最低高度必须小于最高高度"
     if config.range_min < 0.0 or config.range_min >= config.range_max:
@@ -84,8 +108,6 @@ def build_navigation_launches(
     config: NavigationStackConfig,
 ) -> Dict[str, List[str]]:
     """Build the exact ros2 launch argument vector for every component."""
-    def launch_bool(value: bool) -> str:
-        return "true" if value else "false"
     launches = {
         "lidar": list(config.lidar_arguments),
         "camera": list(config.camera_arguments),
@@ -108,26 +130,15 @@ def build_navigation_launches(
             f"range_min:={config.range_min:g}",
             f"range_max:={config.range_max:g}",
         ],
-        "localizer": [
-            "launch", "localizer", "localizer_launch.py",
-            f"map:={Path(config.localization_map).expanduser().resolve()}",
-            f"cloud_topic:={config.localizer_cloud_topic.strip()}",
-            f"odom_topic:={config.localizer_odom_topic.strip()}",
-        ],
-        "nav2": [
-            "launch", "nav2_bringup", "bringup_launch.py",
-            f"map:={Path(config.navigation_map).expanduser().resolve()}",
-            f"use_sim_time:={launch_bool(config.use_sim_time)}",
-            f"autostart:={launch_bool(config.autostart)}",
-            f"rviz:={launch_bool(config.nav2_rviz)}",
-        ],
     }
-    if config.localizer_config.strip():
-        launches["localizer"].append(
-            f"config_path:={Path(config.localizer_config).expanduser().resolve()}")
-    if config.nav2_params.strip():
-        launches["nav2"].append(
-            f"params_file:={Path(config.nav2_params).expanduser().resolve()}")
+    localization = LOCALIZATION_BACKENDS[config.localization_backend]
+    localization_launch = localization.launch_arguments(config)
+    if localization_launch:
+        launches["localizer"] = localization_launch
+    navigation = NAVIGATION_BACKENDS[config.navigation_backend]
+    navigation_launch = navigation.launch_arguments(config)
+    if navigation_launch:
+        launches["nav2"] = navigation_launch
     return launches
 
 
@@ -182,12 +193,16 @@ class NavigationStackController(QObject):
         if not valid:
             return False, message
         self._launches = build_navigation_launches(config)
-        self._queue = list(START_ORDER)
+        self._queue = [key for key in START_ORDER if key in self._launches]
         self._waiting_key = ""
         self._owned_components.clear()
         self._stopping = False
         self._startup_interval_ms = max(0, int(config.startup_interval_ms))
         self._sensor_timeout_s = max(1.0, float(config.sensor_timeout_s))
+        for key in START_ORDER:
+            if key not in self._launches:
+                self.states[key] = "disabled"
+                self.component_state_changed.emit(key, "disabled")
         self._set_overall_state("starting")
         self._record_log("system", "开始按依赖顺序启动导航系统…\n")
         self._start_next()

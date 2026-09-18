@@ -1,0 +1,24 @@
+# cloud_topic: /fastlio2/body_cloud
+# odom_topic: /fastlio2/lio_odom
+cloud_topic: /dlio/odom_node/pointcloud/deskewed
+odom_topic: /dlio/odom_node/odom
+map_frame: map
+local_frame: odom
+update_hz: 1.0
+default_map_path: /home/guest/tron_ros2/src/tron_slam/localizer/PCD/map_hall_test.pcd
+
+# 粗配准参数 - 增加迭代次数，放宽阈值
+rough_scan_resolution: 0.1  # 增加分辨率以处理更大的初始偏差
+rough_map_resolution: 0.05
+rough_max_iteration: 20  # 增加迭代次数
+rough_score_thresh: 5.0 # 放宽阈值
+
+# 精配准参数 - 增加迭代次数，放宽阈值
+refine_scan_resolution: 0.2
+refine_map_resolution: 0.2
+refine_max_iteration: 1000  # 增加迭代次数
+refine_score_thresh: 0.8  # 放宽阈值
+
+# GICP特有参数
+correspondence_randomness: 20    # 对应点随机性，值越大鲁棒性越好，但计算量增加
+maximum_optimizer_iterations: 20 # 优化器迭代次数，影响收敛精度

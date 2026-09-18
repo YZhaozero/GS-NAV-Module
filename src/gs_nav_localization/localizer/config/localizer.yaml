@@ -1,0 +1,49 @@
+# cloud_topic: /fastlio2/body_cloud
+# odom_topic: /fastlio2/lio_odom
+cloud_topic: /dlio/odom_node/pointcloud/deskewed
+odom_topic: /dlio/odom_node/odom
+map_frame: map
+local_frame: odom
+update_hz: 1.0
+default_map_path: /home/zy/ws/car_simple_sim/src/car_localization/localizer/PCD/dilo_map.pcd
+
+# 粗配准参数 - 快速估计大致位置
+rough_scan_resolution: 0.2
+rough_map_resolution: 0.15
+rough_max_iteration: 30
+rough_score_thresh: 10.0
+
+# 精配准参数 - 密集对齐细节
+refine_scan_resolution: 0.05
+refine_map_resolution: 0.05
+refine_max_iteration: 100
+refine_score_thresh: 0.1  
+
+# GICP特有参数
+correspondence_randomness: 20    # 对应点随机性，值越大鲁棒性越好，但计算量增加
+maximum_optimizer_iterations: 20 # 优化器迭代次数，影响收敛精度
+
+# 全局配准参数（可选，用于在无准确初始位姿时提供全局定位）
+teaser_only: false          # 仅使用TEASER++进行全局配准，跳过ICP步骤
+use_global_registration: true    # 启用全局配准（FPFH+TEASER++）
+global_voxel_size: 0.1           # 全局配准降采样体素大小(米) - 减小以保留更多特征点
+global_feature_radius: 2.0      # FPFH特征计算半径(米) - 减小以提高特征区分度和密度
+global_score_thresh: 5.0         # 全局配准适应度评分阈值（TEASER++不使用此阈值）
+
+# // 参数说明：
+# // - use_absolute_scale: false (不使用绝对尺度)
+# // - use_crosscheck: false (关闭交叉检查以获得更多对应点)
+# // - use_tuple_test: false (关闭tuple测试以获得更多对应点)
+# // - tuple_scale: 0.95 (如果启用tuple_test，使用较宽松的阈值)
+teaser_use_absolute_scale: false
+teaser_use_crosscheck: false  
+teaser_use_tuple_test: false
+teaser_tuple_scale: 0.95
+
+# Scan Context 配置
+use_scan_context: true
+sc_database_path: "/home/zy/ws/car_simple_sim/src/car_localization/localizer/sc_db"
+sc_dist_thresh: 0.5         # 匹配阈值，0.3-0.6 之间调节
+sc_max_radius: 80.0
+sc_num_rings: 20
+sc_num_sectors: 60

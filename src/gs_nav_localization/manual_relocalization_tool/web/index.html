@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manual Relocalization Tool</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #222; color: #eee; display: flex; flex-direction: column; align-items: center; }
+        .container { max-width: 900px; width: 100%; padding: 20px; }
+        h1 { text-align: center; color: #4CAF50; margin-bottom: 20px;}
+        .status { padding: 12px; background: #333; border-radius: 5px; margin-bottom: 20px; text-align: center; font-weight: bold;}
+        .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .panel { background: #333; padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .panel h3 { margin-top: 0; color: #81C784; border-bottom: 1px solid #555; padding-bottom: 10px;}
+        
+        button { width: 100%; padding: 12px; margin: 5px 0; background: #555; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 14px; transition: background 0.2s;}
+        button:hover { background: #4CAF50; }
+        button:active { background: #2E7D32; transform: translateY(1px);}
+        
+        .control-group { margin-bottom: 15px; }
+        .control-label { font-size: 14px; color: #aaa; margin-bottom: 5px; display: block;}
+        .btn-row { display: flex; gap: 10px; }
+        .btn-row button { flex: 1; }
+        
+        input[type="text"] { width: 70%; padding: 10px; border: 1px solid #555; background: #222; color: #fff; border-radius: 4px;}
+        .key-badge { background: #444; padding: 2px 6px; border-radius: 3px; font-family: monospace; border: 1px solid #666; font-size: 12px; color: #fff;}
+        
+        .step { font-weight: bold; color: #4CAF50; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ROS2 Manual Relocalization Tool</h1>
+        
+        <div class="status" id="statusBox">WebSocket: Disconnected</div>
+
+        <div class="main-grid">
+            <!-- 左侧：设置与加载 -->
+            <div class="panel">
+                <h3>1. 数据与地图</h3>
+                <div class="control-group">
+                    <p><span class="step">Step 1:</span> 确保机器人静止。</p>
+                    <button onclick="sendCommand('save_source')">📸 锁定当前雷达帧 (Source)</button>
+                </div>
+                
+                <div class="control-group">
+                    <p><span class="step">Step 2:</span> 加载目标 PCD 地图</p>
+                    <div style="display:flex; gap:5px;">
+                        <input type="text" id="pcdPathInput" placeholder="路径 (留空使用默认)...">
+                        <button onclick="loadTargetFromInput()" style="width: 30%;">加载</button>
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-top: 30px;">
+                    <h3>3. 确认与发布</h3>
+                    <p>对齐满意后点击：</p>
+                    <button onclick="sendCommand('confirm')" style="background-color: #d32f2f; font-weight: bold;">🚀 发送 TF 变换 (Map -> Odom)</button>
+                </div>
+            </div>
+
+            <!-- 右侧：6-DOF 控制 -->
+            <div class="panel">
+                <h3>2. 姿态调整 (6-DOF)</h3>
+                
+                <!-- 平移控制 -->
+                <div class="control-group">
+                    <span class="control-label">平移 Translation (step: 0.1m)</span>
+                    <div class="btn-row">
+                        <button onclick="move({dx: 0.1})">前 <span class="key-badge">W</span></button>
+                        <button onclick="move({dx: -0.1})">后 <span class="key-badge">S</span></button>
+                    </div>
+                    <div class="btn-row">
+                        <button onclick="move({dy: 0.1})">左 <span class="key-badge">A</span></button>
+                        <button onclick="move({dy: -0.1})">右 <span class="key-badge">D</span></button>
+                    </div>
+                    <div class="btn-row">
+                        <button onclick="move({dz: 0.1})">上 <span class="key-badge">I</span></button>
+                        <button onclick="move({dz: -0.1})">下 <span class="key-badge">K</span></button>
+                    </div>
+                </div>
+
+                <!-- 旋转控制 -->
+                <div class="control-group">
+                    <span class="control-label">旋转 Rotation (step: 0.02 rad)</span>
+                    <div class="btn-row">
+                        <button onclick="move({dyaw: 0.02})">Yaw+ <span class="key-badge">Q</span></button>
+                        <button onclick="move({dyaw: -0.02})">Yaw- <span class="key-badge">E</span></button>
+                    </div>
+                    <div class="btn-row">
+                        <button onclick="move({dpitch: 0.02})">Pitch+ (抬头) <span class="key-badge">R</span></button>
+                        <button onclick="move({dpitch: -0.02})">Pitch- (低头) <span class="key-badge">F</span></button>
+                    </div>
+                    <div class="btn-row">
+                        <button onclick="move({droll: 0.02})">Roll+ (右倾) <span class="key-badge">C</span></button>
+                        <button onclick="move({droll: -0.02})">Roll- (左倾) <span class="key-badge">Z</span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://localhost:8765");
+        const statusBox = document.getElementById("statusBox");
+
+        ws.onopen = () => {
+            statusBox.innerText = "WebSocket: Connected ✅";
+            statusBox.style.background = "#2e7d32";
+        };
+
+        ws.onclose = () => {
+            statusBox.innerText = "WebSocket: Disconnected ❌";
+            statusBox.style.background = "#c62828";
+        };
+
+        function sendCommand(cmd, params = {}) {
+            if (ws.readyState === WebSocket.OPEN) {
+                const msg = { cmd: cmd, ...params };
+                ws.send(JSON.stringify(msg));
+            } else {
+                alert("WebSocket 未连接，请检查 ROS 节点是否运行。");
+            }
+        }
+
+        // 支持传入对象 {dx, dy, dz, droll, dpitch, dyaw}
+        function move(params) {
+            sendCommand('move', params);
+        }
+
+        function loadTargetFromInput() {
+            const path = document.getElementById('pcdPathInput').value;
+            sendCommand('load_pcd', { path: path });
+        }
+
+        document.addEventListener('keydown', (event) => {
+            // 当焦点在输入框时，禁用快捷键，防止输入路径时触发移动
+            if (document.activeElement.tagName === "INPUT") return;
+
+            const step = 0.05;      // 平移步长 (m)
+            const rot_step = 0.02;  // 旋转步长 (rad)
+
+            switch(event.key.toLowerCase()) {
+                // 平移 Y (前后)
+                case 'w': move({dx: step}); break; 
+                case 's': move({dx: -step}); break;
+                
+                // 平移 X (左右)
+                case 'a': move({dy: step}); break; 
+                case 'd': move({dy: -step}); break;
+
+                // 平移 Z (上下) - 新增
+                case 'i': move({dz: step}); break;
+                case 'k': move({dz: -step}); break;
+                
+                // 旋转 Yaw (Z轴)
+                case 'q': move({dyaw: rot_step}); break;
+                case 'e': move({dyaw: -rot_step}); break;
+
+                // 旋转 Pitch (Y轴) - 新增
+                case 'r': move({dpitch: rot_step}); break;
+                case 'f': move({dpitch: -rot_step}); break;
+
+                // 旋转 Roll (X轴) - 新增
+                case 'c': move({droll: rot_step}); break;
+                case 'z': move({droll: -rot_step}); break;
+            }
+        });
+    </script>
+</body>
+</html>

@@ -110,6 +110,9 @@ To save DLIO's generated map into `.pcd` format, call the following service:
 ros2 service call /save_pcd direct_lidar_inertial_odometry/srv/SavePCD "{'leaf_size': 0.2, 'save_path': '~/map'}"
 ```
 
+`save_path` 可传目录（兼容原接口，保存为 `dlio_map.pcd`），也可直接传完整的
+`.pcd` 文件路径。完整路径模式适合为每次建图生成独立文件，避免覆盖已有地图。
+
 ### Test Data
 For your convenience, we provide test data [here](https://drive.google.com/file/d/1Sp_Mph4rekXKY2euxYxv6SD6WIzB-wVU/view?usp=sharing) (1.2GB, 1m 13s, Ouster OS1-32) of an aggressive motion to test our motion correction scheme, and [here](https://drive.google.com/file/d/1HbmF5gTHxCAMqBkEd5PTxDNQvcI8tKXn/view?usp=sharing) (16.5GB, 4m 21s, Ouster OSDome) of a longer trajectory outside with lots of trees. Try these two datasets with both deskewing on and off!
 

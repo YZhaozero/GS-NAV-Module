@@ -13,6 +13,8 @@
 #include "dlio/map.h"
 #include "dlio/utils.h"
 
+#include <filesystem>
+
 dlio::MapNode::MapNode(): Node("dlio_map_node") {
 
   this->getParams();
@@ -78,10 +80,39 @@ void dlio::MapNode::savePCD(std::shared_ptr<direct_lidar_inertial_odometry::srv:
 
   pcl::PointCloud<PointType>::Ptr m = std::make_shared<pcl::PointCloud<PointType>>(*this->dlio_map);
 
-  float leaf_size = req->leaf_size;
-  std::string p = req->save_path;
+  if (m->empty()) {
+    RCLCPP_ERROR(this->get_logger(), "Cannot save an empty DLIO map");
+    res->success = false;
+    return;
+  }
 
-  std::cout << std::setprecision(2) << "Saving map to " << p + "/dlio_map.pcd"
+  float leaf_size = req->leaf_size;
+  if (leaf_size <= 0.0F) {
+    RCLCPP_ERROR(this->get_logger(), "Map leaf size must be greater than zero");
+    res->success = false;
+    return;
+  }
+
+  // Keep the original directory API compatible, while also accepting a full
+  // .pcd file path so desktop clients can generate non-overwriting names.
+  std::filesystem::path requested_path(req->save_path);
+  std::filesystem::path output_path = requested_path.extension() == ".pcd"
+    ? requested_path
+    : requested_path / "dlio_map.pcd";
+  std::error_code directory_error;
+  if (!output_path.parent_path().empty()) {
+    std::filesystem::create_directories(
+      output_path.parent_path(), directory_error);
+  }
+  if (directory_error) {
+    RCLCPP_ERROR(
+      this->get_logger(), "Cannot create map directory '%s': %s",
+      output_path.parent_path().c_str(), directory_error.message().c_str());
+    res->success = false;
+    return;
+  }
+
+  std::cout << std::setprecision(2) << "Saving map to " << output_path.string()
     << " with leaf size " << to_string_with_precision(leaf_size, 2) << "... "; std::cout.flush();
 
   // voxelize map
@@ -91,7 +122,7 @@ void dlio::MapNode::savePCD(std::shared_ptr<direct_lidar_inertial_odometry::srv:
   vg.filter(*m);
 
   // save map
-  int ret = pcl::io::savePCDFileBinary(p + "/dlio_map.pcd", *m);
+  int ret = pcl::io::savePCDFileBinary(output_path.string(), *m);
   res->success = ret == 0;
 
   if (res->success) {

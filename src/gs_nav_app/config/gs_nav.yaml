@@ -14,6 +14,9 @@
     # 程序启动时自动加载的 PCD/PLY；也可在界面中点击“加载 PCD/PLY”重新选择。
     # ar_nav.launch.py 默认传入包内 maps/dilo_map.pcd；设为空可禁用启动时加载。
     pointcloud_map_path: ""
+    # 所有 PCD/PLY 与 Nav2 YAML/PGM 的统一默认保存目录。
+    # 留空时自动使用当前工作空间的 src/gs_nav_map。
+    map_storage_dir: ""
 
     map_frame: map
     base_frame: base_link

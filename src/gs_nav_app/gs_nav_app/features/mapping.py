@@ -9,7 +9,6 @@ save adapter when required.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -19,6 +18,7 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 
 from ..map_processing import pointcloud2_to_xyz
+from ..map_storage import unique_map_file
 from ..ros_launch_process import RosLaunchProcess
 
 try:
@@ -67,21 +67,10 @@ MAPPING_BACKENDS = {
 
 
 def unique_map_path(
-    directory: Path, map_name: str, now: Optional[datetime] = None,
+    directory: Path, map_name: str, now=None,
 ) -> Path:
     """Return a timestamped PCD path that never replaces an existing map."""
-    raw_name = Path(str(map_name).strip()).stem
-    safe_name = "".join(
-        character if character.isalnum() or character in ("-", "_") else "_"
-        for character in raw_name
-    ).strip("_-") or "gs_map"
-    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    candidate = directory / f"{safe_name}_{timestamp}.pcd"
-    suffix = 1
-    while candidate.exists():
-        candidate = directory / f"{safe_name}_{timestamp}_{suffix:02d}.pcd"
-        suffix += 1
-    return candidate
+    return unique_map_file(directory, map_name, ".pcd", now)
 
 
 class MappingRosAdapter:

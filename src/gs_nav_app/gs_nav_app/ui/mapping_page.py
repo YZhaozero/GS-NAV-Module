@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..features.mapping import MAPPING_BACKENDS, MappingController
+from ..map_storage import default_map_directory
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -41,9 +42,14 @@ class MappingPage(QWidget):
 
     return_requested = pyqtSignal()
 
-    def __init__(self, controller: MappingController, map_panel_factory) -> None:
+    def __init__(
+        self, controller: MappingController, map_panel_factory,
+        map_storage_dir: Path | None = None,
+    ) -> None:
         super().__init__()
         self.controller = controller
+        self.map_storage_dir = default_map_directory(str(
+            map_storage_dir or ""))
         self.process_state = "stopped"
         self.last_cloud_revision = controller.ros.cloud_revision
         self.last_save_revision = controller.ros.save_revision
@@ -173,7 +179,7 @@ class MappingPage(QWidget):
         save_row = QWidget()
         save_row_layout = QHBoxLayout(save_row)
         save_row_layout.setContentsMargins(0, 0, 0, 0)
-        self.save_path = QLineEdit(str(Path.home() / "maps"))
+        self.save_path = QLineEdit(str(self.map_storage_dir))
         choose_save_path = QPushButton("选择")
         choose_save_path.setObjectName("secondaryButton")
         choose_save_path.clicked.connect(self._choose_save_path)

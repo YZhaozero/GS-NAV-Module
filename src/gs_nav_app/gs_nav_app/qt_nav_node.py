@@ -78,6 +78,7 @@ from .map_processing import (
     save_grid_map,
     save_pcd,
 )
+from .map_storage import default_map_directory, unique_map_file
 
 from .nav_math import (
     RenderStyle,
@@ -1328,6 +1329,7 @@ class QtNavRosNode(Node):
         self.declare_parameter("path_topic", "/global_plan")
         self.declare_parameter("pointcloud_topic", "")
         self.declare_parameter("pointcloud_map_path", "")
+        self.declare_parameter("map_storage_dir", "")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("camera_frame", "")
@@ -1352,6 +1354,8 @@ class QtNavRosNode(Node):
         self.path_topic = str(self.get_parameter("path_topic").value)
         self.pointcloud_topic = str(
             self.get_parameter("pointcloud_topic").value)
+        self.map_storage_dir = default_map_directory(str(
+            self.get_parameter("map_storage_dir").value))
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -1752,6 +1756,9 @@ class NavigationWindow(QMainWindow):
     def __init__(self, node: QtNavRosNode) -> None:
         super().__init__()
         self.node = node
+        self.map_storage_dir = default_map_directory(str(
+            getattr(node, "map_storage_dir", "")))
+        self.map_storage_dir.mkdir(parents=True, exist_ok=True)
         self.waypoints = []
         self.waypoint_edit_index: Optional[int] = None
         self.last_map_revision = -1
@@ -1950,7 +1957,7 @@ class NavigationWindow(QMainWindow):
         self.mapping_controller = MappingController(
             mapping_adapter, parent=self)
         self.mapping_page = MappingPage(
-            self.mapping_controller, MapPanel)
+            self.mapping_controller, MapPanel, self.map_storage_dir)
         self.mapping_page.return_requested.connect(
             self.show_navigation_setup)
         self.pages = QStackedWidget()
@@ -3094,7 +3101,7 @@ class NavigationWindow(QMainWindow):
 
     def load_pointcloud_dialog(self) -> None:
         path, _selected = QFileDialog.getOpenFileName(
-            self, "加载点云地图", "",
+            self, "加载点云地图", str(self.map_storage_dir),
             "Point Cloud (*.pcd *.ply);;PCD (*.pcd);;PLY (*.ply);;All Files (*)")
         if not path:
             return
@@ -3110,7 +3117,7 @@ class NavigationWindow(QMainWindow):
 
     def load_grid_dialog(self) -> None:
         path, _selected = QFileDialog.getOpenFileName(
-            self, "加载栅格地图", "",
+            self, "加载栅格地图", str(self.map_storage_dir),
             "Nav2 Map (*.yaml *.yml);;Portable Graymap (*.pgm)")
         if not path:
             return
@@ -3175,8 +3182,8 @@ class NavigationWindow(QMainWindow):
                 if self.local_cloud is None:
                     self.map_status.setText("当前没有可保存的点云")
                     return
-                suggested_path = self.local_cloud.path or FilePath("edited_map.pcd")
-                suggested = str(FilePath(suggested_path).with_suffix(".pcd"))
+                suggested = str(unique_map_file(
+                    self.map_storage_dir, "gs_map", ".pcd"))
                 path, _selected = QFileDialog.getSaveFileName(
                     self, "保存点云地图", suggested, "Point Cloud (*.pcd)")
                 if not path:
@@ -3194,7 +3201,8 @@ class NavigationWindow(QMainWindow):
                 if grid is None:
                     self.map_status.setText("当前没有可保存的栅格地图")
                     return
-                suggested = str(grid.path or "edited_map.yaml")
+                suggested = str(unique_map_file(
+                    self.map_storage_dir, "gs_map", ".yaml"))
                 path, _selected = QFileDialog.getSaveFileName(
                     self, "保存 Nav2 栅格地图", suggested, "Nav2 Map (*.yaml)")
                 if not path:

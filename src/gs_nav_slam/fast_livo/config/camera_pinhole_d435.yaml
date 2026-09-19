@@ -1,0 +1,31 @@
+# RealSense D435i 彩色相机 — vikit Pinhole 相机模型 参数
+# 由 launch 载入 parameter_blackboard, fast_livo 的 laserMapping 通过
+# loadFromRosNs(node,"parameter_blackboard",cam) 读取。
+#
+# 2026-09-16 实测: 本机 realsense2_camera(4.58.3) 不认 launch 里扁平的
+#   color_width/color_height/color_fps, 开关是 rgb_camera.color_profile。
+#   现已把 launch 改成 1280x720x15 (原为驱动默认 640x480x15)。
+#   以下内参直接从新分辨率下 /left_camera/camera_info 的 K 矩阵读出:
+#     fx=910.690  fy=911.042  cx=638.696  cy=360.530
+#   换来的视场: HFOV 55.6° -> 70.2° (VFOV 都是 43.1°, 垂直没变)。
+#   ⚠ 再改 profile 必须同步重读 camera_info 并改这里, 否则
+#     "Frame: provided image has not the same size as the camera model" 崩溃。
+#     apps/exp2_cloud_align.py:97 的 FX/FY/CX/CY 是同一份硬编码, 也要一起改
+#     (该脚本会拿 camera_info 对账, 不一致会报出来)。
+#   d0..d3 = k1,k2,p1,p2, camera_info 里 distortion_model=plumb_bob 且 d≈0, 取 0
+#   (真正畸变标定后续用 Kalibr/FAST-Calib 再做, 当前先跑通)
+
+/**:
+  ros__parameters:
+    cam_model: Pinhole
+    cam_width: 1280
+    cam_height: 720
+    scale: 1.0
+    cam_fx: 910.690
+    cam_fy: 911.042
+    cam_cx: 638.696
+    cam_cy: 360.530
+    cam_d0: 0.0
+    cam_d1: 0.0
+    cam_d2: 0.0
+    cam_d3: 0.0

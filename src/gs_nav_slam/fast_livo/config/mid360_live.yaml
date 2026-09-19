@@ -1,0 +1,143 @@
+# ============================================================
+# FAST-LIVO2 live 配置 — Jetson Orin Nano + Livox MID-360
+# 由仓库 avia.yaml 派生 (humble 分支), 针对 live 场景修改
+#
+# 传感器:
+#   - lidar/imu : Livox MID-360 via livox_ros_driver2 (CustomMsg, xfer_format=1)
+#                 topics /livox/lidar, /livox/imu (driver 默认, 与 FAST-LIO2 一致)
+#   - camera    : RealSense D435i 彩色流 (topic /camera/camera/color/image_raw, 见 common.img_topic)
+#
+# 外参来源: direct_visual_lidar_calibration (Koide 无靶标 NID 法), 2026-09-09 标定
+#   - 数据: ws_calib/data/calib3   结果: ws_calib/data/preprocessed/calib.json
+#   - extrin_calib.Rcl/Pcl : camera<->lidar 外参, 已填真实值(下面 extrin_calib 段有注释)
+#   - extrinsic_R/T        : lidar<->IMU, MID-360 内蕴 IMU 在雷达原点 -> 单位+零(保持)
+#   - camera_pinhole_d435.yaml : D435 内参(已按 camera_info 真实值核对)
+#
+# bring-up: img_en 用 launch 参数覆盖 (stage A = 0 lidar+imu, stage B = 1 +视觉)
+# ============================================================
+/**:
+  ros__parameters:
+    common:
+      img_topic: "/left_camera/image"
+      lid_topic: "/livox/lidar"
+      imu_topic: "/livox/imu"
+      img_en: 1
+      lidar_en: 1
+      ros_driver_bug_fix: false
+
+    extrin_calib:
+      # extrinsic_R/T = lidar<->IMU: MID-360 内蕴 IMU 在雷达原点 -> 单位旋转 + 零平移 (保持)
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      # Rcl/Pcl = 相机系下的雷达位姿 (lidar frame -> camera frame), 即标定 T_lidar_camera 的逆:
+      #   Rcl = R^T,  Pcl = -R^T * t
+      # 标定 T_lidar_camera = [0.0418, 0.0749, 0.0231, -0.3569, 0.3584, -0.6136, 0.6063]
+      # (vio.cpp: Rci=Rcl*Rli; 本配置 Rli=I -> Rci=Rcl, 投影直接用)
+      #
+      # 2026-09-16 Pcl 的 x/y 已修正 (Koide 无靶标标定在 x/y 上残留了系统偏差):
+      #   Pcl_旧 = [ 0.075227,  0.000331, -0.047227]   <- 直接用标定值
+      #   Pcl_新 = [ 0.045227, -0.056669, -0.047227]   <- x -0.030, y -0.057
+      #   依据 apps/exp4_*.py 系列 (判据: 深度分类 vs 图像颜色分类的一致率):
+      #     一致率 93.24% -> 97.8%
+      #   四条独立佐证 (任何一条单独都不够, 合起来才成立):
+      #     1. 判据无偏 —— exp4_sim_bias.py 造了个外参由构造保证正确的合成场景,
+      #        三个轴的最优点**精确落在 Δ=0**, 说明读数不是判据自己爬出来的偏置。
+      #     2. 非位姿漂移 —— exp4_perframe.py: 6 帧各自独立定位姿, 最优值却钉在
+      #        Δx=-0.028±0.004 / Δy=-0.057±0.005, 帧间抖动 ±5px 而效应有 60px。
+      #     3. 非分割阈值artifact —— exp4_seg_sensitivity.py: 暗阈值 55~130
+      #        (椅背像素占比 25%->37%) 扫一圈, Δy* 稳定在 -0.056±0.002。
+      #     4. 肉眼 —— 修正后墙纹理不再溢出到椅背上缘 (见 snap/.../exp4/diag_0.png)。
+      #   ⚠ z 未动: Δz 的最优点只带来 +0.03 个百分点, 落在噪声里, 本场景深度
+      #     动态范围太窄 (0.85~1.27m), 沿光轴方向根本没被约束住。
+      #   ⚠ 只在一处场景标定过 (两把椅子挡白墙)。换场景若发现新的系统性错位,
+      #     优先怀疑这条, 并把两处的最优 Δ 取在**相机系里做刚体平移**再叠加。
+      Rcl: [-0.009911, -0.999877, 0.003392,
+            0.488225, -0.007765, -0.872605,
+            0.872584, -0.007052, 0.488344]
+      Pcl: [0.045227, -0.056669, -0.047227]
+
+    time_offset: 
+      imu_time_offset: 0.0
+      img_time_offset: 0.1
+      exposure_time_init: 0.0
+
+    preprocess:
+      point_filter_num: 1        # mid360 帧点数比 avia 少, 不过滤
+      filter_size_surf: 0.1
+      lidar_type: 1              # Livox CustomMsg (MID-360/Avia 同一 driver 路径)
+      scan_line: 6               # CustomMsg line 分箱; bring-up 验证是否需要按实际 ring 调
+      blind: 0.5                 # 近距盲区 (同 FAST-LIO2 mid360 的 min_range=0.5)
+
+    vio:
+      max_iterations: 5
+      outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+      img_point_cov: 100 # 100 1000 
+      patch_size: 8
+      patch_pyrimid_level: 4
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      acc_cov: 0.5 # 0.2
+      gyr_cov: 0.3 # 0.5
+      b_acc_cov: 0.0001 # 0.1
+      b_gyr_cov: 0.0001 # 0.1
+
+    lio:
+      max_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025 # 0.005
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:  
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: false
+
+    publish:
+      dense_map_en: true
+      # true -> 发 /cloud_effected: LIO 点到面有效点(世界系 camera_init, 无彩色, 覆盖雷达全视场)
+      #         用来在 rviz 里看"被雷达扫到但没被 RGB 上色"的几何; 与彩色的 /cloud_registered 互补
+      pub_effect_point_en: true
+      # true -> 发 /planes /voxels /planner_normal: 体素地图平面(marker, 也是全视场几何)
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "CBD_Building_01"
+      pose_output_en: false
+
+    pcd_save:
+      # true -> 跑完按 Ctrl+C 正常退出时, savePCD() 落盘到
+      #   <src>/fast_livo/Log/pcd/  (注意是 src 目录, 不是 install)
+      #   all_raw_points.pcd        : 全部点 (img_en=1 时是 XYZRGB 彩色, 世界系 camera_init)
+      #   all_downsampled_points.pcd: 按 filter_size_pcd 体素降采样后的
+      #   lidar_poses.txt           : 雷达位姿
+      # 必须配合 interval: -1; 且必须"正常退出"(kill -9 / 断电 不会触发保存)
+      pcd_save_en: true
+      type: 0 # 0: World Frame, 1: Body Frame;
+      colmap_output_en: false # need to set interval = -1
+      filter_size_pcd: 0.15
+      interval: -1
+      # how many LiDAR frames saved in each pcd file;
+      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+    image_save:
+      img_save_en: false
+      interval: 1

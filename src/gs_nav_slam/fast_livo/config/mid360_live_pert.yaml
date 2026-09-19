@@ -1,0 +1,158 @@
+# ============================================================
+# 【外参扰动实验】FAST-LIVO2 配置
+#   = 同目录 mid360_live.yaml 的**逐字副本**, 只改了 extrin_calib.Pcl (见下 ★)
+#
+# 启动 (本文件不会被 colcon 用到, 是显式传给 launch 的):
+#   ros2 launch fast_livo mid360_live.launch.py \
+#       fastlivo_params_file:=/home/navrobot/ws_fastlivo2/src/fast_livo/config/mid360_live_pert.yaml \
+#       rviz:=true
+#
+# 生效路径 (不用 colcon build; install 下是指回 source 的 symlink):
+#   mid360_live.yaml extrin_calib.Rcl/Pcl
+#     -> LIVMapper.cpp:169  get_parameter("extrin_calib.Rcl"/"Pcl")
+#     -> vio.cpp:38-39      Rcl / Pcl
+#     -> vio.cpp:58-59      Rci = Rcl*Rli, Pci = Rcl*Pli + Pcl  (本配置 Rli=I,Pli=0 -> Rci=Rcl,Pci=Pcl)
+#     -> vio.cpp:1695-1697  Rcw = Rci*Rwi^T, Pcw = -Rci*Rwi^T*Pwi + Pci -> new_frame_->T_f_w_
+#     -> frame.h:49         w2c(p) = world2cam(T_f_w_ * p)
+#     -> LIVMapper.cpp:1240-1246  getInterpolatedPixel(img_rgb, pc) -> pointRGB.r/g/b
+#
+# ------------------------------------------------------------
+# 本次扰动: Pcl 的相机系 x 分量 +5cm (相机系 = x 右 / y 下 / z 前)
+#
+#   Pcl[0] +0.05  ->  贴图【右移】:  1m 处 +30px, 2m 处 +15px, 4m 处 +8px
+#   Pcl[1] +0.05  ->  贴图【下移】:  同样 1m/2m/4m = 30/15/8px
+#   Pcl[2] +0.05  ->  【以主点为心的径向缩放】, 轴上点不动; 2m 处离轴点约 0.8%
+#
+#   位移随深度变化(近处挪得多) = 视差, 不是均匀平移 —— 正是外参错的典型特征。
+#   想换方向/幅度就改下面 ★ 那行, 单位是米。
+#
+# ------------------------------------------------------------
+# ⚠ 三个坑:
+#   1) 这个矩阵不只管上色, 它同时进 VIO 的光度残差 (vio.cpp:63-66 的 Jdp_dR/Jdp_dt)。
+#      改大了 VIO 轨迹会跟着变, 你看到的是"投影偏移"+"状态被带跑"的叠加。
+#      看到地图开始撕裂/发散就是这个原因, 把幅度调小。
+#   2) 别手写非旋转的 9 个数当 Rcl: vio.cpp:1697 建 T_f_w_ 时过
+#      Quaterniond(...).normalized(), 会【悄悄正交化】, 你就不知道实际用的是哪个矩阵。
+#      要扰动旋转就用下面注释里已正交化的那份。
+#   3) 原标定的 Rcl 本身就带 ~8.6e-5 的均匀缩放 (非严格正交, 运行时会被告 2 修掉),
+#      属正常, 不用管。
+#
+# 想跑对照: 不加 fastlivo_params_file 时读 mid360_live.yaml (标定原值), 传本文件即扰动版。
+# ============================================================
+/**:
+  ros__parameters:
+    common:
+      img_topic: "/left_camera/image"
+      lid_topic: "/livox/lidar"
+      imu_topic: "/livox/imu"
+      img_en: 1
+      lidar_en: 1
+      ros_driver_bug_fix: false
+
+    extrin_calib:
+      # extrinsic_R/T = lidar<->IMU: MID-360 内蕴 IMU 在雷达原点 -> 单位旋转 + 零平移 (保持)
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      # Rcl/Pcl = 相机系下的雷达位姿 (lidar frame -> camera frame), 即标定 T_lidar_camera 的逆:
+      #   Rcl = R^T,  Pcl = -R^T * t
+      # 标定 T_lidar_camera = [0.0418, 0.0749, 0.0231, -0.3569, 0.3584, -0.6136, 0.6063]
+      # (vio.cpp: Rci=Rcl*Rli; 本配置 Rli=I -> Rci=Rcl, 投影直接用)
+      Rcl: [-0.009911, -0.999877, 0.003392,
+            0.488225, -0.007765, -0.872605,
+            0.872584, -0.007052, 0.488344]
+      # ---- ★ 扰动就在下面这行 ★ (上面 Rcl 保持标定原值, 本轮不动旋转) ----
+      # 标定原值 [0.075227, 0.000331, -0.047227], 本次相机系 x 分量 +0.05m
+      Pcl: [0.075227, -0.05, -0.047227]
+
+      # ---- 备选: 绕相机系 y 轴转 3 度 (已正交化, 可直接替换上面的 Rcl) ----
+      # 旋转的效果和纯平移不同: 位移随【视场位置】变化, 画面中心和边缘挪得不一样
+      # (纯平移是随【深度】变化, 画面上下左右基本一致), 两个都试就能分辨。
+      # Rcl: [ 0.035754, -0.998942,  0.028915,
+      #        0.488284, -0.007783, -0.872650,
+      #        0.871952,  0.045320,  0.487489]
+
+    time_offset: 
+      imu_time_offset: 0.0
+      img_time_offset: 0.1
+      exposure_time_init: 0.0
+
+    preprocess:
+      point_filter_num: 1        # mid360 帧点数比 avia 少, 不过滤
+      filter_size_surf: 0.1
+      lidar_type: 1              # Livox CustomMsg (MID-360/Avia 同一 driver 路径)
+      scan_line: 6               # CustomMsg line 分箱; bring-up 验证是否需要按实际 ring 调
+      blind: 0.5                 # 近距盲区 (同 FAST-LIO2 mid360 的 min_range=0.5)
+
+    vio:
+      max_iterations: 5
+      outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+      img_point_cov: 100 # 100 1000 
+      patch_size: 8
+      patch_pyrimid_level: 4
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      acc_cov: 0.5 # 0.2
+      gyr_cov: 0.3 # 0.5
+      b_acc_cov: 0.0001 # 0.1
+      b_gyr_cov: 0.0001 # 0.1
+
+    lio:
+      max_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025 # 0.005
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:  
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: false
+
+    publish:
+      dense_map_en: true
+      # true -> 发 /cloud_effected: LIO 点到面有效点(世界系 camera_init, 无彩色, 覆盖雷达全视场)
+      #         用来在 rviz 里看"被雷达扫到但没被 RGB 上色"的几何; 与彩色的 /cloud_registered 互补
+      pub_effect_point_en: true
+      # true -> 发 /planes /voxels /planner_normal: 体素地图平面(marker, 也是全视场几何)
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "CBD_Building_01"
+      pose_output_en: false
+
+    pcd_save:
+      # true -> 跑完按 Ctrl+C 正常退出时, savePCD() 落盘到
+      #   <src>/fast_livo/Log/pcd/  (注意是 src 目录, 不是 install)
+      #   all_raw_points.pcd        : 全部点 (img_en=1 时是 XYZRGB 彩色, 世界系 camera_init)
+      #   all_downsampled_points.pcd: 按 filter_size_pcd 体素降采样后的
+      #   lidar_poses.txt           : 雷达位姿
+      # 必须配合 interval: -1; 且必须"正常退出"(kill -9 / 断电 不会触发保存)
+      pcd_save_en: true
+      type: 0 # 0: World Frame, 1: Body Frame;
+      colmap_output_en: false # need to set interval = -1
+      filter_size_pcd: 0.15
+      interval: -1
+      # how many LiDAR frames saved in each pcd file;
+      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+    image_save:
+      img_save_en: false
+      interval: 1

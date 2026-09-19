@@ -75,10 +75,14 @@ def test_window_switches_all_workspaces_to_480x800_portrait_layout():
 
     window.pages.setCurrentWidget(window.active_page)
     app.processEvents()
-    assert window.active_page.map_panel.width() > (
-        window.active_page.camera_panel.width())
-    assert window.active_page.map_panel.height() > (
-        window.active_page.camera_panel.height())
+    assert window.active_page.camera_panel.width() > (
+        window.active_page.map_panel.width())
+    assert window.active_page.camera_panel.height() > (
+        window.active_page.map_panel.height())
+    assert window.active_page.camera_panel._fill
+    video_rect = window.active_page.camera_panel._video_rect()
+    assert video_rect.width() >= window.active_page.camera_panel.width()
+    assert video_rect.height() >= window.active_page.camera_panel.height()
     window.close()
 
 
@@ -861,6 +865,8 @@ def test_navigation_and_map_processing_are_separate_workspaces():
         Qt.WA_TransparentForMouseEvents)
     assert window.pages.currentWidget() is window.setup_page
     assert window.setup_page.isAncestorOf(window.map_panel)
+    assert window.setup_page.isAncestorOf(window.exit_app_button)
+    assert window.exit_app_button.text() in ("退出", "退出程序")
     assert not window.setup_page.isAncestorOf(window.load_cloud_button)
     assert window.map_tools_page.isAncestorOf(window.load_cloud_button)
     assert window.open_navigation_stack_button.text() in ("导航", "导航系统")

@@ -123,10 +123,12 @@ class CameraPanel(QWidget):
         self,
         show_status: bool = True,
         compact: bool = False,
+        fill: bool = False,
         camera_topic: str = "/color/image_raw",
     ) -> None:
         super().__init__()
         self._show_status = show_status
+        self._fill = bool(fill)
         self._camera_topic = camera_topic
         if compact:
             self.setMinimumSize(280, 160)
@@ -172,7 +174,9 @@ class CameraPanel(QWidget):
 
     def _video_rect(self) -> QRectF:
         source_w, source_h = self._source_size
-        scale = min(self.width() / source_w, self.height() / source_h)
+        scale_function = max if self._fill else min
+        scale = scale_function(
+            self.width() / source_w, self.height() / source_h)
         width = source_w * scale
         height = source_h * scale
         return QRectF(
@@ -193,7 +197,7 @@ class CameraPanel(QWidget):
             painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
         else:
             painter.setPen(QColor("#e5ebef"))
-            compact = target.height() < 180 or target.width() < 420
+            compact = min(self.width(), self.height()) < 700
             painter.setFont(QFont(
                 "Sans Serif",
                 8 if compact and self._show_status else (11 if compact else 20),
@@ -201,7 +205,7 @@ class CameraPanel(QWidget):
             ))
             if compact and self._show_status:
                 message = "等待相机"
-                message_rect = target.adjusted(6, 56, -6, -3)
+                message_rect = QRectF(self.rect()).adjusted(6, 56, -6, -3)
             elif compact:
                 topic_parts = [
                     part for part in self._camera_topic.split("/") if part]
@@ -209,7 +213,7 @@ class CameraPanel(QWidget):
                 if len(topic_parts) > 1:
                     short_topic = "…/" + short_topic
                 message = f"等待相机\n{short_topic}"
-                message_rect = target.adjusted(8, 4, -8, -4)
+                message_rect = QRectF(self.rect()).adjusted(8, 4, -8, -4)
             else:
                 message = f"等待相机 {self._camera_topic}"
                 message_rect = target.adjusted(8, 4, -8, -4)
@@ -1771,7 +1775,7 @@ class ActiveNavigationPage(QWidget):
         super().__init__()
         self._mode_callback = mode_callback
         self.camera_panel = CameraPanel(
-            show_status=True, camera_topic=camera_topic)
+            show_status=True, fill=True, camera_topic=camera_topic)
         self.camera_panel.setParent(self)
         self.map_panel = MapPanel(cloud_3d=True)
         self.map_panel.setObjectName("activeMap")
@@ -1844,28 +1848,14 @@ class ActiveNavigationPage(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         compact = min(self.width(), self.height()) < 700
-        if compact:
-            # On a portrait handheld screen the map is the primary view.  The
-            # camera remains available as a small picture-in-picture preview.
-            margin = 6
-            bottom_bar = 62
-            self.map_panel.setGeometry(
-                margin, margin,
-                max(1, self.width() - margin * 2),
-                max(1, self.height() - bottom_bar - margin * 2),
-            )
-            camera_w = min(190, max(132, int(self.width() * 0.38)))
-            camera_h = max(88, int(camera_w * 9 / 16))
-            self.camera_panel.setGeometry(
-                self.width() - camera_w - 14, 48, camera_w, camera_h)
-            map_x, map_y = margin, margin
-            map_w, map_h = self.map_panel.width(), self.map_panel.height()
+        self.camera_panel.setGeometry(self.rect())
+        if self.width() < self.height():
+            map_w = min(260, max(180, int(self.width() * 0.44)))
         else:
-            self.camera_panel.setGeometry(self.rect())
-            map_w = min(370, max(280, int(self.width() * 0.25)))
-            map_h = int(map_w * 0.70)
-            map_x = 26
-            map_y = self.height() - map_h - 88
+            map_w = min(370, max(220, int(self.width() * 0.34)))
+        map_h = int(map_w * 0.68)
+        map_x = 10 if compact else 26
+        map_y = self.height() - map_h - (78 if compact else 88)
         self.camera_panel.set_status_visible(True)
         self.map_panel.setGeometry(map_x, map_y, map_w, map_h)
         self.grid_mode_button.setGeometry(map_x + 10, map_y + 8, 58, 30)
@@ -1887,8 +1877,6 @@ class ActiveNavigationPage(QWidget):
             overlay_h,
         )
         self.map_panel.raise_()
-        if compact:
-            self.camera_panel.raise_()
         self.grid_mode_button.raise_()
         self.cloud_mode_button.raise_()
         self.exit_button.raise_()
@@ -2004,6 +1992,10 @@ class NavigationWindow(QMainWindow):
         self.ros_status = QLabel("ROS 2 ONLINE")
         self.ros_status.setObjectName("onlineChip")
         header_actions.addWidget(self.ros_status)
+        self.exit_app_button = QPushButton("退出程序")
+        self.exit_app_button.setObjectName("dangerButton")
+        self.exit_app_button.clicked.connect(self.close)
+        header_actions.addWidget(self.exit_app_button)
         header.addLayout(header_actions)
         layout.addLayout(header)
 
@@ -2829,6 +2821,7 @@ class NavigationWindow(QMainWindow):
             self.open_mapping_button.setText("建图")
             self.open_map_tools_button.setText("地图")
             self.ros_status.setText("ROS")
+            self.exit_app_button.setText("退出程序")
         else:
             self.main_title_label.setText("GS AR NAVIGATION")
             self.open_navigation_stack_button.setText("导航系统")
@@ -2836,6 +2829,7 @@ class NavigationWindow(QMainWindow):
             self.open_mapping_button.setText("建图")
             self.open_map_tools_button.setText("地图处理")
             self.ros_status.setText("ROS 2 ONLINE")
+            self.exit_app_button.setText("退出程序")
         self.main_title_label.setVisible(
             not (landscape and self.width() < 650))
 

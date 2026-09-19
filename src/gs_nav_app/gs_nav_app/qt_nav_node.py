@@ -49,6 +49,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -163,6 +164,11 @@ class CameraPanel(QWidget):
         self._camera_live = False
         self.update()
 
+    def set_status_visible(self, visible: bool) -> None:
+        """Show or hide the navigation card without rebuilding the panel."""
+        self._show_status = bool(visible)
+        self.update()
+
     def _video_rect(self) -> QRectF:
         source_w, source_h = self._source_size
         scale = min(self.width() / source_w, self.height() / source_h)
@@ -186,9 +192,26 @@ class CameraPanel(QWidget):
             painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
         else:
             painter.setPen(QColor("#e5ebef"))
-            painter.setFont(QFont("Sans Serif", 20, QFont.DemiBold))
+            compact = target.height() < 180 or target.width() < 420
+            painter.setFont(QFont(
+                "Sans Serif",
+                8 if compact and self._show_status else (11 if compact else 20),
+                QFont.DemiBold,
+            ))
+            if compact and self._show_status:
+                message = "等待相机"
+                message_rect = target.adjusted(6, 56, -6, -3)
+            elif compact:
+                message = f"等待相机\n{self._camera_topic}"
+                message_rect = target.adjusted(8, 4, -8, -4)
+            else:
+                message = f"等待相机 {self._camera_topic}"
+                message_rect = target.adjusted(8, 4, -8, -4)
             painter.drawText(
-                target, Qt.AlignCenter, f"等待相机 {self._camera_topic}")
+                message_rect,
+                Qt.AlignCenter | Qt.TextWordWrap,
+                message,
+            )
 
         if self._route is not None:
             self._draw_route(painter, target)
@@ -218,22 +241,47 @@ class CameraPanel(QWidget):
             painter.drawPolygon(polygon)
 
     def _draw_status(self, painter: QPainter, target: QRectF) -> None:
-        card = QRectF(target.left() + 22, target.top() + 20, 235, 66)
+        compact = target.width() < 320 or target.height() < 180
+        margin = 8 if compact else 22
+        card_width = max(110.0, min(235.0, target.width() - margin * 2))
+        card_height = 52 if compact else 66
+        card = QRectF(
+            target.left() + margin,
+            target.top() + (8 if compact else 20),
+            card_width,
+            card_height,
+        )
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(7, 12, 18, 205))
         painter.drawRoundedRect(card, 12, 12)
         painter.setPen(QColor("#f4f7f9"))
-        painter.setFont(QFont("Sans Serif", 17, QFont.DemiBold))
+        painter.setFont(QFont(
+            "Sans Serif", 13 if compact else 17, QFont.DemiBold))
+        distance_text = (
+            f"{self._distance:.1f} m" if self._route is not None else "-- m")
         painter.drawText(
-            card.adjusted(17, 8, -10, -28),
+            card.adjusted(12 if compact else 17, 4, -8, -22),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"{self._distance:.1f} m",
+            distance_text,
         )
         painter.setPen(QColor("#94a5b2"))
-        painter.setFont(QFont("Sans Serif", 10))
-        state = "相机在线 · 全局路径" if self._camera_live else "等待相机数据"
+        painter.setFont(QFont("Sans Serif", 8 if compact else 10))
+        if not self._camera_live:
+            state = "等待相机数据"
+        elif self._route is None:
+            state = "相机在线 · 等待路径投影"
+        else:
+            state = "相机在线 · 路径已显示"
         painter.drawText(
-            card.adjusted(17, 34, -10, -7), Qt.AlignLeft | Qt.AlignVCenter, state)
+            card.adjusted(
+                12 if compact else 17,
+                27 if compact else 34,
+                -8,
+                -4 if compact else -7,
+            ),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            state,
+        )
 
 
 class MapPanel(QWidget):
@@ -1329,7 +1377,8 @@ class QtNavRosNode(Node):
         self.declare_parameter("camera_topic", "/color/image_raw")
         self.declare_parameter("camera_info_topic", "/color/camera_info")
         self.declare_parameter("map_topic", "/map")
-        self.declare_parameter("path_topic", "/global_plan")
+        self.declare_parameter("path_topic", "/plan")
+        self.declare_parameter("path_topic_fallbacks", ["/global_plan"])
         self.declare_parameter("pointcloud_topic", "")
         self.declare_parameter("pointcloud_map_path", "")
         self.declare_parameter("map_storage_dir", "")
@@ -1340,6 +1389,7 @@ class QtNavRosNode(Node):
         self.declare_parameter("route_width_m", 0.95)
         self.declare_parameter("camera_height_m", 0.72)
         self.declare_parameter("horizon_ratio", 0.43)
+        self.declare_parameter("fullscreen_on_small_screen", True)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.map_frame = str(self.get_parameter("map_frame").value)
@@ -1355,8 +1405,18 @@ class QtNavRosNode(Node):
             self.get_parameter("camera_info_topic").value)
         self.map_topic = str(self.get_parameter("map_topic").value)
         self.path_topic = str(self.get_parameter("path_topic").value)
+        configured_fallbacks = [
+            str(topic).strip()
+            for topic in self.get_parameter("path_topic_fallbacks").value
+            if str(topic).strip()
+        ]
+        self.path_topics = tuple(dict.fromkeys(
+            [self.path_topic, *configured_fallbacks, "/plan", "/global_plan"]
+        ))
         self.pointcloud_topic = str(
             self.get_parameter("pointcloud_topic").value)
+        self.fullscreen_on_small_screen = bool(
+            self.get_parameter("fullscreen_on_small_screen").value)
         self.map_storage_dir = default_map_directory(str(
             self.get_parameter("map_storage_dir").value))
         self._last_camera_message_time = 0.0
@@ -1389,8 +1449,16 @@ class QtNavRosNode(Node):
             CameraInfo, self.camera_info_topic, self._on_camera_info, sensor_qos)
         self.create_subscription(
             OccupancyGrid, self.map_topic, self._on_map, map_qos)
-        self.create_subscription(
-            Path, self.path_topic, self._on_path, reliable_qos)
+        self.path_subscriptions = []
+        for topic in self.path_topics:
+            subscription = self.create_subscription(
+                Path,
+                topic,
+                lambda msg, source_topic=topic: self._on_path(
+                    msg, source_topic),
+                reliable_qos,
+            )
+            self.path_subscriptions.append(subscription)
         if self.pointcloud_topic:
             self.create_subscription(
                 PointCloud2, self.pointcloud_topic,
@@ -1406,6 +1474,8 @@ class QtNavRosNode(Node):
         self.camera_info_size: Optional[Tuple[int, int]] = None
         self.path = np.empty((0, 3), dtype=np.float32)
         self.path_frame = self.map_frame
+        self.active_path_topic = ""
+        self.path_message_count = 0
         self.occupancy: Optional[np.ndarray] = None
         self.grid_frame = self.map_frame
         self.map_origin = np.zeros(2, dtype=np.float32)
@@ -1423,7 +1493,8 @@ class QtNavRosNode(Node):
         self.get_logger().info(
             f"Qt navigation ready: camera={self.camera_topic}, "
             f"camera_info={self.camera_info_topic}, map={self.map_topic}, "
-            f"path={self.path_topic}, action=/navigate_through_poses")
+            f"path_topics={list(self.path_topics)}, "
+            "action=/navigate_through_poses")
 
     def _on_image(self, msg: Image) -> None:
         try:
@@ -1450,10 +1521,27 @@ class QtNavRosNode(Node):
         }.get(key, 0.0)
         return last_message > 0.0 and time.monotonic() - last_message < 2.0
 
-    def _on_path(self, msg: Path) -> None:
+    def _on_path(self, msg: Path, source_topic: Optional[str] = None) -> None:
         if not self.navigation_active:
             self.clear_navigation_path()
             return
+        if not msg.poses:
+            return
+        source_topic = str(source_topic or getattr(
+            self, "path_topic", "/plan"))
+        path_topics = tuple(getattr(self, "path_topics", (source_topic,)))
+        active_topic = str(getattr(self, "active_path_topic", ""))
+        if active_topic and active_topic != source_topic:
+            try:
+                source_priority = path_topics.index(source_topic)
+            except ValueError:
+                source_priority = len(path_topics)
+            try:
+                active_priority = path_topics.index(active_topic)
+            except ValueError:
+                active_priority = len(path_topics)
+            if source_priority > active_priority:
+                return
         self.path = np.array([
             (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
             for pose in msg.poses
@@ -1463,6 +1551,14 @@ class QtNavRosNode(Node):
             or (msg.poses[0].header.frame_id if msg.poses else "")
             or self.map_frame
         )
+        topic_changed = active_topic != source_topic
+        self.active_path_topic = source_topic
+        self.path_message_count = int(getattr(
+            self, "path_message_count", 0)) + 1
+        if topic_changed and hasattr(self, "get_logger"):
+            self.get_logger().info(
+                f"Navigation path received from {source_topic}: "
+                f"{len(self.path)} poses, frame={self.path_frame}")
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         expected = int(msg.info.width * msg.info.height)
@@ -1520,10 +1616,9 @@ class QtNavRosNode(Node):
                     apply_transform(left, matrix), k)
                 right_px, right_valid = project_optical(
                     apply_transform(right, matrix), k)
-                return (
-                    center_px, left_px, right_px,
-                    center_valid & left_valid & right_valid,
-                )
+                valid = center_valid & left_valid & right_valid
+                if len(valid) >= 2 and np.any(valid[:-1] & valid[1:]):
+                    return center_px, left_px, right_px, valid
         if self.projection_mode == "calibrated":
             return None
         matrix = self.lookup_matrix(self.base_frame, self.path_frame)
@@ -1535,10 +1630,10 @@ class QtNavRosNode(Node):
             apply_transform(left, matrix), image_shape, self.style)
         right_px, right_valid = project_ground(
             apply_transform(right, matrix), image_shape, self.style)
-        return (
-            center_px, left_px, right_px,
-            center_valid & left_valid & right_valid,
-        )
+        valid = center_valid & left_valid & right_valid
+        if len(valid) >= 2 and np.any(valid[:-1] & valid[1:]):
+            return center_px, left_px, right_px, valid
+        return None
 
     def path_in_frame(self, target: str) -> Optional[np.ndarray]:
         if not len(self.path):
@@ -1566,6 +1661,7 @@ class QtNavRosNode(Node):
     def clear_navigation_path(self) -> None:
         self.path = np.empty((0, 3), dtype=np.float32)
         self.path_frame = self.map_frame
+        self.active_path_topic = ""
 
     def send_navigation_waypoints(self, waypoints) -> bool:
         if not waypoints:
@@ -1741,23 +1837,43 @@ class ActiveNavigationPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.camera_panel.setGeometry(self.rect())
-        map_w = min(370, max(280, int(self.width() * 0.25)))
-        map_h = int(map_w * 0.70)
-        map_x = 26
-        map_y = self.height() - map_h - 88
+        compact = self.width() < 700
+        if compact:
+            # On a portrait handheld screen the map is the primary view.  The
+            # camera remains available as a small picture-in-picture preview.
+            margin = 6
+            bottom_bar = 62
+            self.map_panel.setGeometry(
+                margin, margin,
+                max(1, self.width() - margin * 2),
+                max(1, self.height() - bottom_bar - margin * 2),
+            )
+            camera_w = min(190, max(132, int(self.width() * 0.38)))
+            camera_h = max(88, int(camera_w * 9 / 16))
+            self.camera_panel.setGeometry(
+                self.width() - camera_w - 14, 48, camera_w, camera_h)
+            map_x, map_y = margin, margin
+            map_w, map_h = self.map_panel.width(), self.map_panel.height()
+        else:
+            self.camera_panel.setGeometry(self.rect())
+            map_w = min(370, max(280, int(self.width() * 0.25)))
+            map_h = int(map_w * 0.70)
+            map_x = 26
+            map_y = self.height() - map_h - 88
+        self.camera_panel.set_status_visible(True)
         self.map_panel.setGeometry(map_x, map_y, map_w, map_h)
-        self.grid_mode_button.setGeometry(map_x + 12, map_y + 10, 62, 28)
-        self.cloud_mode_button.setGeometry(map_x + 78, map_y + 10, 62, 28)
-        button_w, button_h = 190, 46
+        self.grid_mode_button.setGeometry(map_x + 10, map_y + 8, 58, 30)
+        self.cloud_mode_button.setGeometry(map_x + 72, map_y + 8, 58, 30)
+        button_w = min(190, max(150, self.width() - 120))
+        button_h = 44
         self.exit_button.setGeometry(
             (self.width() - button_w) // 2,
             self.height() - button_h - 20,
             button_w,
             button_h,
         )
-        overlay_w = min(500, max(320, self.width() - 80))
-        overlay_h = 126
+        overlay_w = min(500, max(240, self.width() - 28))
+        overlay_h = 110 if compact else 126
         self.result_overlay.setGeometry(
             (self.width() - overlay_w) // 2,
             max(74, int(self.height() * 0.18)),
@@ -1765,6 +1881,8 @@ class ActiveNavigationPage(QWidget):
             overlay_h,
         )
         self.map_panel.raise_()
+        if compact:
+            self.camera_panel.raise_()
         self.grid_mode_button.raise_()
         self.cloud_mode_button.raise_()
         self.exit_button.raise_()
@@ -1812,10 +1930,16 @@ class NavigationWindow(QMainWindow):
         self.sensor_preview_status_labels = {}
         self.last_sensor_preview_revisions = dict(
             self.sensor_preview_adapter.revisions)
+        self._compact_mode: Optional[bool] = None
         self.setWindowTitle("GS AR Navigation Console")
-        self.resize(1500, 900)
-        self.setMinimumSize(1100, 680)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        initial_width = min(1500, available.width()) if available else 1500
+        initial_height = min(900, available.height()) if available else 900
+        self.resize(initial_width, initial_height)
+        self.setMinimumSize(360, 520)
         self._build_ui()
+        self._set_compact_mode(initial_width < 700)
         self._load_configured_pointcloud()
         self.pending_navigation_result_status: Optional[int] = None
         self.navigation_return_timer = QTimer(self)
@@ -1831,10 +1955,12 @@ class NavigationWindow(QMainWindow):
         """Build three distinct workspaces: navigation, map tools, active nav."""
         root = QWidget()
         layout = QVBoxLayout(root)
+        self.setup_layout = layout
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        # Actions use a second row so all controls remain reachable at 480 px.
+        header = QVBoxLayout()
         title = QLabel("GS AR NAVIGATION")
         title.setObjectName("title")
         subtitle = QLabel("实时相机 · 栅格地图 · Nav2 全局导航")
@@ -1844,30 +1970,34 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.setSpacing(6)
+        header_actions.addStretch(1)
         self.open_navigation_stack_button = QPushButton("导航系统")
         self.open_navigation_stack_button.setObjectName("primaryButton")
         self.open_navigation_stack_button.clicked.connect(
             self.show_navigation_stack)
-        header.addWidget(self.open_navigation_stack_button)
+        header_actions.addWidget(self.open_navigation_stack_button)
         self.open_sensor_tools_button = QPushButton("传感器管理")
         self.open_sensor_tools_button.setObjectName("workspaceButton")
         self.open_sensor_tools_button.clicked.connect(self.show_sensor_tools)
-        header.addWidget(self.open_sensor_tools_button)
+        header_actions.addWidget(self.open_sensor_tools_button)
         self.open_mapping_button = QPushButton("建图")
         self.open_mapping_button.setObjectName("workspaceButton")
         self.open_mapping_button.clicked.connect(self.show_mapping)
-        header.addWidget(self.open_mapping_button)
+        header_actions.addWidget(self.open_mapping_button)
         self.open_map_tools_button = QPushButton("地图处理")
         self.open_map_tools_button.setObjectName("workspaceButton")
         self.open_map_tools_button.clicked.connect(self.show_map_tools)
-        header.addWidget(self.open_map_tools_button)
+        header_actions.addWidget(self.open_map_tools_button)
         self.ros_status = QLabel("ROS 2 ONLINE")
         self.ros_status.setObjectName("onlineChip")
-        header.addWidget(self.ros_status)
+        header_actions.addWidget(self.ros_status)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.setup_splitter = splitter
         map_card = QFrame()
         map_card.setObjectName("sidePanel")
         map_layout = QVBoxLayout(map_card)
@@ -1906,6 +2036,7 @@ class NavigationWindow(QMainWindow):
             "单击添加途径点；点云模式可左键拖动旋转、右键平移、滚轮缩放")
         hint.setObjectName("hint")
         map_layout.addWidget(hint)
+        self.setup_map_card = map_card
         splitter.addWidget(map_card)
 
         side = QFrame()
@@ -1968,6 +2099,7 @@ class NavigationWindow(QMainWindow):
         self.nav_status.setObjectName("statusBar")
         side_layout.addWidget(self.nav_status)
 
+        self.setup_side_panel = side
         splitter.addWidget(side)
         splitter.setSizes([1080, 380])
         splitter.setStretchFactor(0, 1)
@@ -2016,7 +2148,7 @@ class NavigationWindow(QMainWindow):
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("GS SENSOR MANAGER")
         title.setObjectName("title")
@@ -2025,21 +2157,25 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.addStretch(1)
         monitor_button = QPushButton("传感器数据")
         monitor_button.setObjectName("primaryButton")
         monitor_button.clicked.connect(self.show_sensor_monitor)
-        header.addWidget(monitor_button)
+        header_actions.addWidget(monitor_button)
         back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.show_navigation_setup)
-        header.addWidget(back_button)
+        header_actions.addWidget(back_button)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.sensor_tools_splitter = splitter
         controls = QFrame()
         controls.setObjectName("sidePanel")
         controls.setMinimumWidth(440)
+        self.sensor_tools_controls = controls
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(16, 16, 16, 16)
         controls_layout.setSpacing(12)
@@ -2097,7 +2233,7 @@ class NavigationWindow(QMainWindow):
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("GS SENSOR VIEW")
         title.setObjectName("title")
@@ -2106,15 +2242,17 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.addStretch(1)
         refresh_button = QPushButton("刷新话题")
         refresh_button.setObjectName("secondaryButton")
         refresh_button.clicked.connect(self.refresh_sensor_topics)
-        header.addWidget(refresh_button)
+        header_actions.addWidget(refresh_button)
         back_button = QPushButton("返回传感器管理")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.leave_sensor_monitor)
-        header.addWidget(back_button)
+        header_actions.addWidget(back_button)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         self.sensor_monitor_tabs = QTabWidget()
@@ -2417,7 +2555,7 @@ class NavigationWindow(QMainWindow):
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("GS MAP STUDIO")
         title.setObjectName("title")
@@ -2426,14 +2564,17 @@ class NavigationWindow(QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.addStretch(1)
         back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.show_navigation_setup)
-        header.addWidget(back_button)
+        header_actions.addWidget(back_button)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.map_tools_splitter = splitter
         self.editor_map_panel = MapPanel(cloud_3d=True)
         self.editor_map_panel.setObjectName("mapEditorPanel")
         self.editor_map_panel.edit_started.connect(self.snapshot_map_edit)
@@ -2444,6 +2585,7 @@ class NavigationWindow(QMainWindow):
         controls.setObjectName("sidePanel")
         controls.setMinimumWidth(360)
         controls.setMaximumWidth(440)
+        self.map_tools_controls = controls
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(18, 18, 18, 18)
         controls_layout.setSpacing(13)
@@ -2631,16 +2773,86 @@ class NavigationWindow(QMainWindow):
         controls_layout.addStretch(1)
         self.update_cloud_display_options(show_status=False)
 
-        splitter.addWidget(controls)
+        controls_scroll = QScrollArea()
+        controls_scroll.setObjectName("transparentScroll")
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setWidget(controls)
+        splitter.addWidget(controls_scroll)
         splitter.setSizes([1050, 400])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         layout.addWidget(splitter, 1)
         return root
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "setup_splitter"):
+            self._set_compact_mode(self.width() < 700)
+
+    def _set_compact_mode(self, compact: bool) -> None:
+        """Switch every workspace between desktop and portrait layouts."""
+        compact = bool(compact)
+        if self._compact_mode == compact:
+            return
+        self._compact_mode = compact
+
+        margins = (8, 6, 8, 8) if compact else (22, 18, 22, 22)
+        spacing = 7 if compact else 14
+        for page in (
+            self.setup_page,
+            self.map_tools_page,
+            self.sensor_tools_page,
+            self.sensor_monitor_page,
+        ):
+            page_layout = page.layout()
+            if page_layout is not None:
+                page_layout.setContentsMargins(*margins)
+                page_layout.setSpacing(spacing)
+
+        for label in self.findChildren(QLabel):
+            if label.objectName() == "subtitle":
+                label.setVisible(not compact)
+
+        orientation = Qt.Vertical if compact else Qt.Horizontal
+        self.setup_splitter.setOrientation(orientation)
+        self.sensor_tools_splitter.setOrientation(orientation)
+        self.map_tools_splitter.setOrientation(orientation)
+
+        self.setup_side_panel.setMinimumWidth(0)
+        self.sensor_tools_controls.setMinimumWidth(0 if compact else 440)
+        self.map_tools_controls.setMinimumWidth(0 if compact else 360)
+        self.map_tools_controls.setMaximumWidth(16777215 if compact else 440)
+
+        self.map_panel.setMinimumSize(180 if compact else 260, 170 if compact else 200)
+        self.editor_map_panel.setMinimumSize(
+            180 if compact else 260, 170 if compact else 200)
+        self.camera_panel.setMinimumSize(180 if compact else 280, 96 if compact else 160)
+        self.camera_panel.setMinimumHeight(96 if compact else 170)
+        self.camera_panel.setMaximumHeight(150 if compact else 260)
+        self.waypoint_list.setMinimumHeight(68 if compact else 130)
+        self.active_page.camera_panel.setMinimumSize(
+            120 if compact else 640, 76 if compact else 420)
+        self.active_page.map_panel.setMinimumSize(
+            180 if compact else 260, 170 if compact else 200)
+
+        if compact:
+            self.setup_splitter.setSizes([360, 300])
+            self.sensor_tools_splitter.setSizes([390, 260])
+            self.map_tools_splitter.setSizes([350, 310])
+        else:
+            self.setup_splitter.setSizes([1080, 380])
+            self.sensor_tools_splitter.setSizes([500, 900])
+            self.map_tools_splitter.setSizes([1050, 400])
+
+        self.mapping_page.set_compact_mode(compact)
+        self.navigation_stack_page.set_compact_mode(compact)
+        self.setStyleSheet(self._style_sheet(compact))
+        self.updateGeometry()
+
     @staticmethod
-    def _style_sheet() -> str:
-        return """
+    def _style_sheet(compact: bool = False) -> str:
+        base = """
         QMainWindow, QWidget { background: #0b1016; color: #eaf0f4; }
         QLabel#title { font-size: 25px; font-weight: 700; letter-spacing: 2px; }
         QLabel#subtitle { color: #728493; font-size: 12px; }
@@ -2756,6 +2968,36 @@ class NavigationWindow(QMainWindow):
         }
         QPushButton#exitNavigationButton:hover { background: #5b252d; color: white; }
         QSplitter::handle { background: transparent; width: 12px; }
+        """
+        if not compact:
+            return base
+        return base + """
+        QLabel#title { font-size: 18px; letter-spacing: 1px; }
+        QLabel#sectionTitle { font-size: 14px; }
+        QLabel#hint { font-size: 10px; }
+        QLabel#onlineChip {
+            border-radius: 8px; padding: 4px 7px; font-size: 9px;
+        }
+        QPushButton {
+            min-height: 34px; border-radius: 6px; padding: 0 7px;
+            font-size: 11px;
+        }
+        QPushButton#mapModeButton {
+            min-height: 26px; max-height: 30px; min-width: 42px;
+            padding: 0 5px; font-size: 10px;
+        }
+        QComboBox, QDoubleSpinBox, QLineEdit {
+            min-height: 28px; font-size: 11px;
+        }
+        QTabBar::tab {
+            min-width: 48px; min-height: 28px; padding: 1px 5px;
+            font-size: 10px;
+        }
+        QPlainTextEdit#sensorLog { font-size: 10px; padding: 4px; }
+        QPlainTextEdit#imuData { font-size: 11px; padding: 8px; }
+        QListWidget#waypointList::item { min-height: 29px; padding: 1px 5px; }
+        QScrollArea#transparentScroll { border: none; background: transparent; }
+        QSplitter::handle { width: 6px; height: 6px; }
         """
 
     def _load_configured_pointcloud(self) -> None:
@@ -3644,7 +3886,14 @@ def main(args=None) -> None:
     app.setApplicationName("GS Navigation Console")
     node = QtNavRosNode()
     window = NavigationWindow(node)
-    window.show()
+    screen = app.primaryScreen()
+    available = screen.availableGeometry() if screen is not None else None
+    small_screen = available is not None and available.width() < 700
+    if small_screen and node.fullscreen_on_small_screen:
+        window.setGeometry(available)
+        window.showFullScreen()
+    else:
+        window.show()
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     signal.signal(signal.SIGTERM, lambda *_: app.quit())
 

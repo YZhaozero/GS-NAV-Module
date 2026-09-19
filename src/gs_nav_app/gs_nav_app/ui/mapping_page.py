@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -65,7 +66,7 @@ class MappingPage(QWidget):
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("GS MAPPING STUDIO")
         title.setObjectName("title")
@@ -74,18 +75,21 @@ class MappingPage(QWidget):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.addStretch(1)
         refresh_button = QPushButton("刷新输入话题")
         refresh_button.setObjectName("secondaryButton")
         refresh_button.clicked.connect(self.refresh_topics)
-        header.addWidget(refresh_button)
+        header_actions.addWidget(refresh_button)
         back_button = QPushButton("返回 AR 导航")
         back_button.setObjectName("workspaceButton")
         back_button.clicked.connect(self.return_requested.emit)
-        header.addWidget(back_button)
+        header_actions.addWidget(back_button)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.splitter = splitter
         map_card = QFrame()
         map_card.setObjectName("sidePanel")
         map_layout = QVBoxLayout(map_card)
@@ -117,6 +121,7 @@ class MappingPage(QWidget):
         controls.setObjectName("sidePanel")
         controls.setMinimumWidth(390)
         controls.setMaximumWidth(500)
+        self.controls = controls
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(16, 16, 16, 16)
         controls_layout.setSpacing(10)
@@ -219,11 +224,32 @@ class MappingPage(QWidget):
         self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.log_view.document().setMaximumBlockCount(3000)
         controls_layout.addWidget(self.log_view, 1)
-        splitter.addWidget(controls)
+        controls_scroll = QScrollArea()
+        controls_scroll.setObjectName("transparentScroll")
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setWidget(controls)
+        splitter.addWidget(controls_scroll)
         splitter.setSizes([1000, 440])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         layout.addWidget(splitter, 1)
+
+    def set_compact_mode(self, compact: bool) -> None:
+        """Use a vertically scrollable layout on narrow portrait screens."""
+        compact = bool(compact)
+        self.layout().setContentsMargins(
+            *(8, 6, 8, 8) if compact else (22, 18, 22, 22))
+        self.layout().setSpacing(7 if compact else 14)
+        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.controls.setMinimumWidth(0 if compact else 390)
+        self.controls.setMaximumWidth(16777215 if compact else 500)
+        self.map_panel.setMinimumSize(
+            180 if compact else 260, 170 if compact else 200)
+        self.splitter.setSizes([350, 300] if compact else [1000, 440])
+        for label in self.findChildren(QLabel):
+            if label.objectName() == "subtitle":
+                label.setVisible(not compact)
 
     @staticmethod
     def _editable_combo(placeholder: str) -> QComboBox:

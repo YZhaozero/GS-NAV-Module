@@ -17,6 +17,11 @@ def generate_launch_description():
             default_value=default_pointcloud,
             description="PCD/PLY loaded when the navigation UI starts; empty disables it",
         ),
+        DeclareLaunchArgument(
+            "fullscreen_on_small_screen",
+            default_value="true",
+            description="Use fullscreen mode automatically below 700 px width",
+        ),
         Node(
             package="gs_nav_app",
             executable="qt_nav_node",
@@ -25,6 +30,8 @@ def generate_launch_description():
             parameters=[config, {
                 "pointcloud_map_path": LaunchConfiguration(
                     "pointcloud_map_path"),
+                "fullscreen_on_small_screen": LaunchConfiguration(
+                    "fullscreen_on_small_screen"),
             }],
         ),
     ])

@@ -206,7 +206,7 @@ ros2 run gs_nav_app ar_nav_node --ros-args \
   -p camera_topic:=/color/image_raw \
   -p camera_info_topic:=/color/camera_info \
   -p map_topic:=/map \
-  -p path_topic:=/global_plan
+  -p path_topic:=/plan
 ```
 
 ## 投影模式

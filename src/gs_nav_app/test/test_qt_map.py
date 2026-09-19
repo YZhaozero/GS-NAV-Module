@@ -37,6 +37,49 @@ def test_navigation_yaml_matches_the_runtime_node_name():
     parameters = config["/gs_qt_nav"]["ros__parameters"]
     assert parameters["camera_topic"] == "/camera/camera/color/image_raw"
     assert parameters["camera_info_topic"] == "/camera/camera/color/camera_info"
+    assert parameters["path_topic"] == "/plan"
+    assert "/global_plan" in parameters["path_topic_fallbacks"]
+    assert parameters["fullscreen_on_small_screen"] is True
+
+
+def test_window_switches_all_workspaces_to_480x800_portrait_layout():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+        camera_topic = "/camera/camera/color/image_raw"
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    window = NavigationWindow(FakeNode())
+    window.refresh_timer.stop()
+    window.resize(480, 800)
+    window.show()
+    app.processEvents()
+
+    assert window.minimumWidth() <= 480
+    assert window.minimumHeight() <= 800
+    assert window._compact_mode
+    assert window.setup_splitter.orientation() == Qt.Vertical
+    assert window.map_tools_splitter.orientation() == Qt.Vertical
+    assert window.sensor_tools_splitter.orientation() == Qt.Vertical
+    assert window.mapping_page.splitter.orientation() == Qt.Vertical
+    assert window.navigation_stack_page.splitter.orientation() == Qt.Vertical
+    assert window.map_tools_controls.maximumWidth() > 480
+    assert window.camera_panel.maximumHeight() == 150
+
+    window.pages.setCurrentWidget(window.active_page)
+    app.processEvents()
+    assert window.active_page.map_panel.width() > (
+        window.active_page.camera_panel.width())
+    assert window.active_page.map_panel.height() > (
+        window.active_page.camera_panel.height())
+    window.close()
 
 
 def test_map_click_coordinate_round_trip():
@@ -950,3 +993,34 @@ def test_global_path_is_ignored_after_navigation_exit():
     node = FakeNode()
     QtNavRosNode._on_path(node, message)
     assert node.path.shape == (0, 3)
+
+
+def test_nav2_plan_topic_is_preferred_over_legacy_global_plan():
+    class FakeNode:
+        navigation_active = True
+        path_topic = "/plan"
+        path_topics = ("/plan", "/global_plan")
+        active_path_topic = ""
+        path_message_count = 0
+        map_frame = "map"
+
+    def path_message(x: float) -> Path:
+        message = Path()
+        message.header.frame_id = "map"
+        pose = PoseStamped()
+        pose.pose.position.x = x
+        message.poses.append(pose)
+        return message
+
+    node = FakeNode()
+    QtNavRosNode._on_path(node, path_message(1.0), "/global_plan")
+    assert node.active_path_topic == "/global_plan"
+    assert node.path[0, 0] == 1.0
+
+    QtNavRosNode._on_path(node, path_message(2.0), "/plan")
+    assert node.active_path_topic == "/plan"
+    assert node.path[0, 0] == 2.0
+
+    QtNavRosNode._on_path(node, path_message(3.0), "/global_plan")
+    assert node.active_path_topic == "/plan"
+    assert node.path[0, 0] == 2.0

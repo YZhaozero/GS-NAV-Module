@@ -97,7 +97,7 @@ class ArNavNode(Node):
         self.declare_parameter("camera_topic", "/color/image_raw")
         self.declare_parameter("camera_info_topic", "/color/camera_info")
         self.declare_parameter("map_topic", "/map")
-        self.declare_parameter("path_topic", "/global_plan")
+        self.declare_parameter("path_topic", "/plan")
         self.declare_parameter("output_topic", "/gs_nav/ar_image")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("map_frame", "map")

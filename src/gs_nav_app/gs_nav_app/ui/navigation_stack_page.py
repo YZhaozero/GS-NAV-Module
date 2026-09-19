@@ -83,7 +83,7 @@ class NavigationStackPage(QWidget):
         layout.setContentsMargins(22, 18, 22, 22)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("GS NAVIGATION SYSTEM")
         title.setObjectName("title")
@@ -92,17 +92,21 @@ class NavigationStackPage(QWidget):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
-        header.addStretch(1)
+        header_actions = QHBoxLayout()
+        header_actions.addStretch(1)
         back = QPushButton("返回 AR 导航")
         back.setObjectName("workspaceButton")
         back.clicked.connect(self.return_requested.emit)
-        header.addWidget(back)
+        header_actions.addWidget(back)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.splitter = splitter
         controls = QFrame()
         controls.setObjectName("sidePanel")
         controls.setMinimumWidth(560)
+        self.controls = controls
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(16, 16, 16, 16)
         controls_layout.setSpacing(10)
@@ -191,6 +195,19 @@ class NavigationStackPage(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
+
+    def set_compact_mode(self, compact: bool) -> None:
+        """Stack controls and logs when the screen cannot fit two columns."""
+        compact = bool(compact)
+        self.layout().setContentsMargins(
+            *(8, 6, 8, 8) if compact else (22, 18, 22, 22))
+        self.layout().setSpacing(7 if compact else 14)
+        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.controls.setMinimumWidth(0 if compact else 560)
+        self.splitter.setSizes([400, 250] if compact else [620, 780])
+        for label in self.findChildren(QLabel):
+            if label.objectName() == "subtitle":
+                label.setVisible(not compact)
 
     def _build_map_tab(self) -> QWidget:
         tab = QWidget()

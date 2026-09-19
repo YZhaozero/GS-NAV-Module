@@ -7,8 +7,10 @@
     camera_info_topic: /camera/camera/color/camera_info
     # 直接使用导航 map_server 发布的同一份栅格地图。
     map_topic: /map
-    # TEB 全局规划路径发布话题。
-    path_topic: /global_plan
+    # Nav2 默认全局路径；兼容旧 TEB/global_planner 的 /global_plan。
+    path_topic: /plan
+    path_topic_fallbacks:
+      - /global_plan
     # 可选：订阅实时 PointCloud2 作为点云地图；留空时只使用本地 PCD/PLY。
     pointcloud_topic: ""
     # 程序启动时自动加载的 PCD/PLY；也可在界面中点击“加载 PCD/PLY”重新选择。
@@ -29,3 +31,6 @@
     route_width_m: 0.95
     camera_height_m: 0.72
     horizon_ratio: 0.43
+
+    # 屏幕宽度小于 700 像素时自动使用紧凑布局并全屏显示。
+    fullscreen_on_small_screen: true

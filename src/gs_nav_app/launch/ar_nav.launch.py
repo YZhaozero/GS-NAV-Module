@@ -20,7 +20,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "fullscreen_on_small_screen",
             default_value="true",
-            description="Use fullscreen mode automatically below 700 px width",
+            description="Use fullscreen mode when either screen edge is below 700 px",
         ),
         Node(
             package="gs_nav_app",

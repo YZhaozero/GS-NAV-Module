@@ -32,5 +32,5 @@
     camera_height_m: 0.72
     horizon_ratio: 0.43
 
-    # 屏幕宽度小于 700 像素时自动使用紧凑布局并全屏显示。
+    # 屏幕任一边小于 700 像素时自动使用紧凑布局并全屏显示。
     fullscreen_on_small_screen: true

@@ -35,6 +35,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -202,7 +203,12 @@ class CameraPanel(QWidget):
                 message = "等待相机"
                 message_rect = target.adjusted(6, 56, -6, -3)
             elif compact:
-                message = f"等待相机\n{self._camera_topic}"
+                topic_parts = [
+                    part for part in self._camera_topic.split("/") if part]
+                short_topic = topic_parts[-1] if topic_parts else self._camera_topic
+                if len(topic_parts) > 1:
+                    short_topic = "…/" + short_topic
+                message = f"等待相机\n{short_topic}"
                 message_rect = target.adjusted(8, 4, -8, -4)
             else:
                 message = f"等待相机 {self._camera_topic}"
@@ -1837,7 +1843,7 @@ class ActiveNavigationPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        compact = self.width() < 700
+        compact = min(self.width(), self.height()) < 700
         if compact:
             # On a portrait handheld screen the map is the primary view.  The
             # camera remains available as a small picture-in-picture preview.
@@ -1931,15 +1937,18 @@ class NavigationWindow(QMainWindow):
         self.last_sensor_preview_revisions = dict(
             self.sensor_preview_adapter.revisions)
         self._compact_mode: Optional[bool] = None
+        self._layout_profile = ""
         self.setWindowTitle("GS AR Navigation Console")
         screen = QApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else None
         initial_width = min(1500, available.width()) if available else 1500
         initial_height = min(900, available.height()) if available else 900
         self.resize(initial_width, initial_height)
-        self.setMinimumSize(360, 520)
+        # Fractional scaling can expose a 480x800 panel as roughly 320x533
+        # logical pixels, so keep the hard minimum below that logical size.
+        self.setMinimumSize(320, 280)
         self._build_ui()
-        self._set_compact_mode(initial_width < 700)
+        self._set_compact_mode(min(initial_width, initial_height) < 700)
         self._load_configured_pointcloud()
         self.pending_navigation_result_status: Optional[int] = None
         self.navigation_return_timer = QTimer(self)
@@ -1961,7 +1970,9 @@ class NavigationWindow(QMainWindow):
 
         # Actions use a second row so all controls remain reachable at 480 px.
         header = QVBoxLayout()
+        self.setup_header = header
         title = QLabel("GS AR NAVIGATION")
+        self.main_title_label = title
         title.setObjectName("title")
         subtitle = QLabel("实时相机 · 栅格地图 · Nav2 全局导航")
         subtitle.setObjectName("subtitle")
@@ -2001,6 +2012,7 @@ class NavigationWindow(QMainWindow):
         map_card = QFrame()
         map_card.setObjectName("sidePanel")
         map_layout = QVBoxLayout(map_card)
+        self.setup_map_layout = map_layout
         map_layout.setContentsMargins(16, 16, 16, 16)
         map_layout.setSpacing(10)
         map_header = QHBoxLayout()
@@ -2042,6 +2054,7 @@ class NavigationWindow(QMainWindow):
         side = QFrame()
         side.setObjectName("sidePanel")
         side_layout = QVBoxLayout(side)
+        self.setup_side_layout = side_layout
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(10)
         camera_title = QLabel("实时相机")
@@ -2149,6 +2162,7 @@ class NavigationWindow(QMainWindow):
         layout.setSpacing(14)
 
         header = QVBoxLayout()
+        self.sensor_tools_header = header
         title_box = QVBoxLayout()
         title = QLabel("GS SENSOR MANAGER")
         title.setObjectName("title")
@@ -2234,6 +2248,7 @@ class NavigationWindow(QMainWindow):
         layout.setSpacing(14)
 
         header = QVBoxLayout()
+        self.sensor_monitor_header = header
         title_box = QVBoxLayout()
         title = QLabel("GS SENSOR VIEW")
         title.setObjectName("title")
@@ -2556,6 +2571,7 @@ class NavigationWindow(QMainWindow):
         layout.setSpacing(14)
 
         header = QVBoxLayout()
+        self.map_tools_header = header
         title_box = QVBoxLayout()
         title = QLabel("GS MAP STUDIO")
         title.setObjectName("title")
@@ -2788,14 +2804,40 @@ class NavigationWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if hasattr(self, "setup_splitter"):
-            self._set_compact_mode(self.width() < 700)
+            self._set_compact_mode(min(self.width(), self.height()) < 700)
 
     def _set_compact_mode(self, compact: bool) -> None:
         """Switch every workspace between desktop and portrait layouts."""
         compact = bool(compact)
-        if self._compact_mode == compact:
+        if not compact:
+            profile = "desktop"
+        elif self.width() < self.height():
+            profile = "compact_portrait"
+        else:
+            profile = "compact_landscape"
+        if self._layout_profile == profile:
             return
         self._compact_mode = compact
+        self._layout_profile = profile
+        portrait = profile == "compact_portrait"
+        landscape = profile == "compact_landscape"
+
+        if landscape:
+            self.main_title_label.setText("GS NAV")
+            self.open_navigation_stack_button.setText("导航")
+            self.open_sensor_tools_button.setText("传感器")
+            self.open_mapping_button.setText("建图")
+            self.open_map_tools_button.setText("地图")
+            self.ros_status.setText("ROS")
+        else:
+            self.main_title_label.setText("GS AR NAVIGATION")
+            self.open_navigation_stack_button.setText("导航系统")
+            self.open_sensor_tools_button.setText("传感器管理")
+            self.open_mapping_button.setText("建图")
+            self.open_map_tools_button.setText("地图处理")
+            self.ros_status.setText("ROS 2 ONLINE")
+        self.main_title_label.setVisible(
+            not (landscape and self.width() < 650))
 
         margins = (8, 6, 8, 8) if compact else (22, 18, 22, 22)
         spacing = 7 if compact else 14
@@ -2814,7 +2856,17 @@ class NavigationWindow(QMainWindow):
             if label.objectName() == "subtitle":
                 label.setVisible(not compact)
 
-        orientation = Qt.Vertical if compact else Qt.Horizontal
+        header_direction = (
+            QBoxLayout.LeftToRight if landscape else QBoxLayout.TopToBottom)
+        for header in (
+            self.setup_header,
+            self.sensor_tools_header,
+            self.sensor_monitor_header,
+            self.map_tools_header,
+        ):
+            header.setDirection(header_direction)
+
+        orientation = Qt.Vertical if portrait else Qt.Horizontal
         self.setup_splitter.setOrientation(orientation)
         self.sensor_tools_splitter.setOrientation(orientation)
         self.map_tools_splitter.setOrientation(orientation)
@@ -2827,26 +2879,44 @@ class NavigationWindow(QMainWindow):
         self.map_panel.setMinimumSize(180 if compact else 260, 170 if compact else 200)
         self.editor_map_panel.setMinimumSize(
             180 if compact else 260, 170 if compact else 200)
-        self.camera_panel.setMinimumSize(180 if compact else 280, 96 if compact else 160)
-        self.camera_panel.setMinimumHeight(96 if compact else 170)
-        self.camera_panel.setMaximumHeight(150 if compact else 260)
-        self.waypoint_list.setMinimumHeight(68 if compact else 130)
+        camera_min_height = 64 if landscape else (96 if compact else 160)
+        camera_max_height = 86 if landscape else (150 if compact else 260)
+        self.camera_panel.setMinimumSize(
+            160 if landscape else (180 if compact else 280),
+            camera_min_height,
+        )
+        self.camera_panel.setMinimumHeight(camera_min_height)
+        self.camera_panel.setMaximumHeight(camera_max_height)
+        self.waypoint_list.setMinimumHeight(
+            42 if landscape else (68 if compact else 130))
         self.active_page.camera_panel.setMinimumSize(
             120 if compact else 640, 76 if compact else 420)
         self.active_page.map_panel.setMinimumSize(
             180 if compact else 260, 170 if compact else 200)
 
-        if compact:
+        if portrait:
             self.setup_splitter.setSizes([360, 300])
             self.sensor_tools_splitter.setSizes([390, 260])
             self.map_tools_splitter.setSizes([350, 310])
+        elif landscape:
+            self.setup_splitter.setSizes([480, 310])
+            self.sensor_tools_splitter.setSizes([450, 340])
+            self.map_tools_splitter.setSizes([430, 360])
         else:
             self.setup_splitter.setSizes([1080, 380])
             self.sensor_tools_splitter.setSizes([500, 900])
             self.map_tools_splitter.setSizes([1050, 400])
 
-        self.mapping_page.set_compact_mode(compact)
-        self.navigation_stack_page.set_compact_mode(compact)
+        self.mapping_page.set_compact_mode(compact, portrait=portrait)
+        self.navigation_stack_page.set_compact_mode(
+            compact, portrait=portrait)
+        side_margins = (7, 6, 7, 6) if landscape else (
+            (10, 9, 10, 9) if compact else (14, 14, 14, 14))
+        self.setup_side_layout.setContentsMargins(*side_margins)
+        self.setup_side_layout.setSpacing(4 if landscape else (7 if compact else 10))
+        self.setup_map_layout.setContentsMargins(
+            *(8, 7, 8, 7) if compact else (16, 16, 16, 16))
+        self.setup_map_layout.setSpacing(5 if compact else 10)
         self.setStyleSheet(self._style_sheet(compact))
         self.updateGeometry()
 
@@ -3888,7 +3958,8 @@ def main(args=None) -> None:
     window = NavigationWindow(node)
     screen = app.primaryScreen()
     available = screen.availableGeometry() if screen is not None else None
-    small_screen = available is not None and available.width() < 700
+    small_screen = available is not None and min(
+        available.width(), available.height()) < 700
     if small_screen and node.fullscreen_on_small_screen:
         window.setGeometry(available)
         window.showFullScreen()

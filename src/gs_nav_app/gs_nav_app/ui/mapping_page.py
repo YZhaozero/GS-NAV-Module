@@ -14,6 +14,7 @@ import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QBoxLayout,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -67,6 +68,7 @@ class MappingPage(QWidget):
         layout.setSpacing(14)
 
         header = QVBoxLayout()
+        self.header = header
         title_box = QVBoxLayout()
         title = QLabel("GS MAPPING STUDIO")
         title.setObjectName("title")
@@ -235,18 +237,33 @@ class MappingPage(QWidget):
         splitter.setStretchFactor(1, 0)
         layout.addWidget(splitter, 1)
 
-    def set_compact_mode(self, compact: bool) -> None:
+    def set_compact_mode(
+        self, compact: bool, portrait: bool | None = None,
+    ) -> None:
         """Use a vertically scrollable layout on narrow portrait screens."""
         compact = bool(compact)
+        portrait = (
+            compact and self.width() < self.height()
+            if portrait is None else compact and bool(portrait))
+        landscape = compact and not portrait
         self.layout().setContentsMargins(
             *(8, 6, 8, 8) if compact else (22, 18, 22, 22))
         self.layout().setSpacing(7 if compact else 14)
-        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.header.setDirection(
+            QBoxLayout.LeftToRight if landscape else QBoxLayout.TopToBottom)
+        self.splitter.setOrientation(Qt.Vertical if portrait else Qt.Horizontal)
         self.controls.setMinimumWidth(0 if compact else 390)
         self.controls.setMaximumWidth(16777215 if compact else 500)
         self.map_panel.setMinimumSize(
-            180 if compact else 260, 170 if compact else 200)
-        self.splitter.setSizes([350, 300] if compact else [1000, 440])
+            160 if landscape else (180 if compact else 260),
+            120 if landscape else (170 if compact else 200),
+        )
+        if portrait:
+            self.splitter.setSizes([350, 300])
+        elif landscape:
+            self.splitter.setSizes([430, 360])
+        else:
+            self.splitter.setSizes([1000, 440])
         for label in self.findChildren(QLabel):
             if label.objectName() == "subtitle":
                 label.setVisible(not compact)

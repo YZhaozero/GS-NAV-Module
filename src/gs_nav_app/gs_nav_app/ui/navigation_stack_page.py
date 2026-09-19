@@ -9,6 +9,7 @@ from typing import Callable
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QBoxLayout,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -84,6 +85,7 @@ class NavigationStackPage(QWidget):
         layout.setSpacing(14)
 
         header = QVBoxLayout()
+        self.header = header
         title_box = QVBoxLayout()
         title = QLabel("GS NAVIGATION SYSTEM")
         title.setObjectName("title")
@@ -196,15 +198,28 @@ class NavigationStackPage(QWidget):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
 
-    def set_compact_mode(self, compact: bool) -> None:
+    def set_compact_mode(
+        self, compact: bool, portrait: bool | None = None,
+    ) -> None:
         """Stack controls and logs when the screen cannot fit two columns."""
         compact = bool(compact)
+        portrait = (
+            compact and self.width() < self.height()
+            if portrait is None else compact and bool(portrait))
+        landscape = compact and not portrait
         self.layout().setContentsMargins(
             *(8, 6, 8, 8) if compact else (22, 18, 22, 22))
         self.layout().setSpacing(7 if compact else 14)
-        self.splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.header.setDirection(
+            QBoxLayout.LeftToRight if landscape else QBoxLayout.TopToBottom)
+        self.splitter.setOrientation(Qt.Vertical if portrait else Qt.Horizontal)
         self.controls.setMinimumWidth(0 if compact else 560)
-        self.splitter.setSizes([400, 250] if compact else [620, 780])
+        if portrait:
+            self.splitter.setSizes([400, 250])
+        elif landscape:
+            self.splitter.setSizes([350, 430])
+        else:
+            self.splitter.setSizes([620, 780])
         for label in self.findChildren(QLabel):
             if label.objectName() == "subtitle":
                 label.setVisible(not compact)

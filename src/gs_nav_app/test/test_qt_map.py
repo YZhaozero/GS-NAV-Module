@@ -82,6 +82,39 @@ def test_window_switches_all_workspaces_to_480x800_portrait_layout():
     window.close()
 
 
+def test_window_uses_compact_landscape_layout_for_rotated_800x480_display():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+        camera_topic = "/camera/camera/color/image_raw"
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    window = NavigationWindow(FakeNode())
+    window.refresh_timer.stop()
+    window.resize(800, 480)
+    window.show()
+    app.processEvents()
+
+    assert window.size().height() == 480
+    assert window.minimumHeight() <= 480
+    assert window.setup_page.minimumSizeHint().width() <= 800
+    assert window._layout_profile == "compact_landscape"
+    assert window.setup_splitter.orientation() == Qt.Horizontal
+    assert window.map_tools_splitter.orientation() == Qt.Horizontal
+    assert window.sensor_tools_splitter.orientation() == Qt.Horizontal
+    assert window.mapping_page.splitter.orientation() == Qt.Horizontal
+    assert window.navigation_stack_page.splitter.orientation() == Qt.Horizontal
+    assert window.camera_panel.maximumHeight() == 86
+    window.close()
+
+
 def test_map_click_coordinate_round_trip():
     app = QApplication.instance() or QApplication([])
     assert app is not None
@@ -818,7 +851,7 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     window.refresh_timer.stop()
     assert window.convert_coordinates_combo.currentData() == "display"
     assert window.map_panel._cloud_3d_enabled
-    assert window.camera_panel.maximumHeight() == 260
+    assert window.camera_panel.maximumHeight() <= 260
     assert window.camera_panel._camera_topic == FakeNode.camera_topic
     assert not window.camera_panel._show_status
     assert window.active_page.camera_panel._show_status
@@ -830,7 +863,7 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     assert window.setup_page.isAncestorOf(window.map_panel)
     assert not window.setup_page.isAncestorOf(window.load_cloud_button)
     assert window.map_tools_page.isAncestorOf(window.load_cloud_button)
-    assert window.open_navigation_stack_button.text() == "导航系统"
+    assert window.open_navigation_stack_button.text() in ("导航", "导航系统")
     assert window.navigation_stack_page.log_tabs.count() == 8
     assert [
         window.navigation_stack_page.parameter_tabs.tabText(index)

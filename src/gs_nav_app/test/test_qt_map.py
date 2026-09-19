@@ -14,6 +14,7 @@ from PyQt5.QtGui import QMouseEvent  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from gs_nav_app.qt_nav_node import (  # noqa: E402
+    CameraPanel,
     MapPanel,
     NavigationWindow,
     QtNavRosNode,
@@ -140,6 +141,22 @@ def test_map_click_coordinate_round_trip():
     recovered = panel.widget_to_world(pixel)
     assert recovered is not None
     assert np.allclose(recovered, world, atol=resolution * 1.5)
+
+
+def test_camera_panel_converts_each_ros_frame_only_once():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    panel = CameraPanel()
+    first = np.zeros((48, 64, 3), dtype=np.uint8)
+    second = np.full((48, 64, 3), 255, dtype=np.uint8)
+
+    panel.set_frame(first, None, 0.0, frame_revision=1)
+    first_key = panel._pixmap.cacheKey()
+    panel.set_frame(second, None, 0.0, frame_revision=1)
+    assert panel._pixmap.cacheKey() == first_key
+
+    panel.set_frame(second, None, 0.0, frame_revision=2)
+    assert panel._pixmap.cacheKey() != first_key
 
 
 def test_pointcloud_view_coordinate_round_trip():

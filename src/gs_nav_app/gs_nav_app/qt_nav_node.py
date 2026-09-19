@@ -136,6 +136,7 @@ class CameraPanel(QWidget):
             self.setMinimumSize(640, 420)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._pixmap: Optional[QPixmap] = None
+        self._frame_revision: Optional[int] = None
         self._source_size = (1280, 720)
         self._route = None
         self._distance = 0.0
@@ -146,15 +147,27 @@ class CameraPanel(QWidget):
         frame_bgr: Optional[np.ndarray],
         route,
         remaining_m: float,
+        frame_revision: Optional[int] = None,
     ) -> None:
-        if frame_bgr is not None:
-            rgb = np.ascontiguousarray(frame_bgr[:, :, ::-1])
-            h, w = rgb.shape[:2]
-            qimage = QImage(
-                rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+        new_frame = frame_bgr is not None and (
+            frame_revision is None or frame_revision != self._frame_revision)
+        if new_frame:
+            frame = np.ascontiguousarray(frame_bgr)
+            h, w = frame.shape[:2]
+            bgr_format = getattr(QImage, "Format_BGR888", None)
+            if bgr_format is not None:
+                qimage = QImage(
+                    frame.data, w, h, frame.strides[0], bgr_format).copy()
+            else:
+                rgb = np.ascontiguousarray(frame[:, :, ::-1])
+                qimage = QImage(
+                    rgb.data, w, h, rgb.strides[0],
+                    QImage.Format_RGB888,
+                ).copy()
             self._pixmap = QPixmap.fromImage(qimage)
             self._source_size = (w, h)
             self._camera_live = True
+            self._frame_revision = frame_revision
         self._route = route
         self._distance = remaining_m
         self.update()
@@ -163,6 +176,7 @@ class CameraPanel(QWidget):
         if camera_topic is not None:
             self._camera_topic = camera_topic
         self._pixmap = None
+        self._frame_revision = None
         self._route = None
         self._camera_live = False
         self.update()
@@ -1479,6 +1493,7 @@ class QtNavRosNode(Node):
         self.sensor_preview = SensorPreviewRosAdapter(self)
 
         self.latest_image: Optional[np.ndarray] = None
+        self.image_revision = 0
         self.camera_frame = ""
         self.camera_matrix: Optional[np.ndarray] = None
         self.camera_info_size: Optional[Tuple[int, int]] = None
@@ -1509,6 +1524,7 @@ class QtNavRosNode(Node):
     def _on_image(self, msg: Image) -> None:
         try:
             self.latest_image = image_to_bgr(msg)
+            self.image_revision += 1
             self.camera_frame = self.camera_frame_override or msg.header.frame_id
             self._last_camera_message_time = time.monotonic()
         except (ValueError, TypeError) as exc:
@@ -1924,6 +1940,10 @@ class NavigationWindow(QMainWindow):
         self.sensor_preview_status_labels = {}
         self.last_sensor_preview_revisions = dict(
             self.sensor_preview_adapter.revisions)
+        self._cached_route = None
+        self._cached_remaining_distance = 0.0
+        self._last_route_refresh = 0.0
+        self._last_map_navigation_refresh = 0.0
         self._compact_mode: Optional[bool] = None
         self._layout_profile = ""
         self.setWindowTitle("GS AR Navigation Console")
@@ -1945,6 +1965,7 @@ class NavigationWindow(QMainWindow):
         self.navigation_return_timer.timeout.connect(
             self._finish_navigation_return)
         self.refresh_timer = QTimer(self)
+        self.refresh_timer.setTimerType(Qt.PreciseTimer)
         self.refresh_timer.timeout.connect(self.refresh)
         self.refresh_timer.start(33)
 
@@ -3842,6 +3863,10 @@ class NavigationWindow(QMainWindow):
         self.navigation_return_timer.stop()
         self.pending_navigation_result_status = None
         self.active_page.clear_navigation_result()
+        self._cached_route = None
+        self._cached_remaining_distance = 0.0
+        self._last_route_refresh = 0.0
+        self._last_map_navigation_refresh = 0.0
         self.last_navigation_result_revision = int(
             getattr(self.node, "navigation_result_revision", 0))
         if self.node.send_navigation_waypoints(self.waypoints):
@@ -3886,16 +3911,29 @@ class NavigationWindow(QMainWindow):
     def refresh(self) -> None:
         self._handle_navigation_terminal_state()
         self._refresh_sensor_previews()
-        if self.pages.currentWidget() is self.mapping_page:
+        current_page = self.pages.currentWidget()
+        if current_page is self.mapping_page:
             self.mapping_page.refresh()
         image = self.node.latest_image
-        route = None
-        if image is not None:
-            route = self.node.projected_route(image.shape)
-        self.camera_panel.set_frame(
-            image, route, self.node.remaining_distance())
-        self.active_page.camera_panel.set_frame(
-            image, route, self.node.remaining_distance())
+        now = time.monotonic()
+        image_revision = int(getattr(
+            self.node, "image_revision", id(image) if image is not None else 0))
+        if current_page is self.active_page:
+            if now - self._last_route_refresh >= 1.0 / 15.0:
+                self._cached_route = (
+                    self.node.projected_route(image.shape)
+                    if image is not None else None)
+                self._cached_remaining_distance = self.node.remaining_distance()
+                self._last_route_refresh = now
+            self.active_page.camera_panel.set_frame(
+                image,
+                self._cached_route,
+                self._cached_remaining_distance,
+                image_revision,
+            )
+        elif current_page is self.setup_page:
+            self.camera_panel.set_frame(
+                image, None, 0.0, image_revision)
         if self.local_grid is not None:
             if self._rendered_grid_edit_revision != self._grid_edit_revision:
                 self._render_grid(self.local_grid)
@@ -3927,10 +3965,15 @@ class NavigationWindow(QMainWindow):
             ):
                 panel.set_pointcloud(self.node.latest_pointcloud)
             self.last_pointcloud_revision = self.node.pointcloud_revision
-        path, robot_xy, robot_yaw = self.node.map_navigation_state()
-        self.map_panel.set_navigation_state(path, robot_xy, robot_yaw)
-        self.active_page.map_panel.set_navigation_state(
-            path, robot_xy, robot_yaw)
+        if (
+            current_page in (self.setup_page, self.active_page)
+            and now - self._last_map_navigation_refresh >= 1.0 / 15.0
+        ):
+            path, robot_xy, robot_yaw = self.node.map_navigation_state()
+            self.map_panel.set_navigation_state(path, robot_xy, robot_yaw)
+            self.active_page.map_panel.set_navigation_state(
+                path, robot_xy, robot_yaw)
+            self._last_map_navigation_refresh = now
         self.nav_status.setText(self.node.navigation_status)
 
     def closeEvent(self, event) -> None:
@@ -3963,6 +4006,7 @@ def main(args=None) -> None:
     signal.signal(signal.SIGTERM, lambda *_: app.quit())
 
     ros_timer = QTimer()
+    ros_timer.setTimerType(Qt.PreciseTimer)
     ros_timer.timeout.connect(lambda: rclpy.spin_once(node, timeout_sec=0.0))
     ros_timer.start(5)
     try:

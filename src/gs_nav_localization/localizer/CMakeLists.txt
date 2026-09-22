@@ -14,8 +14,11 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # find dependencies
+find_package(OpenMP REQUIRED)
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -39,12 +42,14 @@ find_package(yaml-cpp REQUIRED)
 # Find TEASER++
 find_package(teaserpp REQUIRED)
 message(STATUS "TEASER++ found: ${teaserpp_FOUND}")
-
-
+find_package(GTSAM REQUIRED)
+find_package(TBB REQUIRED)
 
 include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
+  ${GTSAM_INCLUDE_DIR}
+  ${TBB_INCLUDE_DIRS}
   /usr/local/include
 )
 
@@ -54,16 +59,29 @@ set(SRC_LIST src/localizers/commons.cpp
              src/localizers/matcher.cc)
 
 add_executable(localizer_node src/localizer_node.cpp ${SRC_LIST})
-ament_target_dependencies(localizer_node rclcpp std_msgs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
+ament_target_dependencies(localizer_node rclcpp std_msgs std_srvs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
 target_link_libraries(localizer_node 
   ${PCL_LIBRARIES}  
   yaml-cpp
   teaserpp::teaser_registration
   teaserpp::teaser_io
+  gtsam
+  TBB::tbb
+  OpenMP::OpenMP_CXX
 ) 
 
+add_executable(generate_sc_tool src/generate_sc_tool.cpp ${SRC_LIST})
+target_link_libraries(generate_sc_tool
+  ${PCL_LIBRARIES}
+  yaml-cpp
+  teaserpp::teaser_registration
+  teaserpp::teaser_io
+  gtsam
+  TBB::tbb
+  OpenMP::OpenMP_CXX
+)
 
-install(TARGETS localizer_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS localizer_node generate_sc_tool DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})

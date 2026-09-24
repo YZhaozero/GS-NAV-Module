@@ -17,6 +17,7 @@ endif()
 find_package(OpenMP REQUIRED)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -59,7 +60,7 @@ set(SRC_LIST src/localizers/commons.cpp
              src/localizers/matcher.cc)
 
 add_executable(localizer_node src/localizer_node.cpp ${SRC_LIST})
-ament_target_dependencies(localizer_node rclcpp std_msgs std_srvs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
+ament_target_dependencies(localizer_node rclcpp rcl_interfaces std_msgs std_srvs sensor_msgs nav_msgs message_filters pcl_conversions tf2_ros geometry_msgs visualization_msgs interface)
 target_link_libraries(localizer_node 
   ${PCL_LIBRARIES}  
   yaml-cpp

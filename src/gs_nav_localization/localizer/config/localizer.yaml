@@ -26,11 +26,16 @@ global_voxel_size: 0.2
 global_feature_radius: 2.0
 global_score_thresh: 5.0
 
-# Tron Scan Context map-grid database. The generated cache is <map>.sc.
+# Scan Context ROS 2 parameters.
+# Startup-only parameters: changing these requires restarting localizer because
+# they affect SC database loading/generation. The generated cache is <map>.sc.
 use_scan_context: true
-sc_dist_thresh: 0.5
 sc_max_radius: 80.0
 sc_grid_resolution: 2.0
+
+# Runtime parameters: these can be changed with `ros2 param set` and take
+# effect on the next global relocalization.
+sc_dist_thresh: 0.5
 sc_similar_candidates_thresh: 0.1
 sc_max_candidates: 10
 sc_enable_early_exit: false

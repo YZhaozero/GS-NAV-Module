@@ -13,9 +13,12 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 // ROS2核心头文件
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -117,6 +120,10 @@ public:
         m_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 
         m_localizer = std::make_shared<ICPLocalizer>(m_localizer_config);
+        m_parameter_callback_handle = this->add_on_set_parameters_callback(
+            std::bind(
+                &LocalizerNode::onParametersSet, this,
+                std::placeholders::_1));
 
         RCLCPP_INFO(this->get_logger(), "========================================");
         RCLCPP_INFO(this->get_logger(), "📍 地图配置信息:");
@@ -175,6 +182,120 @@ public:
 
     ~LocalizerNode() = default;
 
+    void declareScanContextParameters()
+    {
+        rcl_interfaces::msg::ParameterDescriptor restart_required;
+        restart_required.read_only = true;
+        restart_required.description =
+            "Applied while loading the map/SC database; change at startup and restart the node.";
+
+        rcl_interfaces::msg::ParameterDescriptor runtime_configurable;
+        runtime_configurable.description =
+            "Can be changed at runtime and is applied to the next global relocalization.";
+
+        m_localizer_config.use_scan_context = this->declare_parameter<bool>(
+            "use_scan_context", m_localizer_config.use_scan_context,
+            restart_required);
+        m_localizer_config.sc_max_radius = this->declare_parameter<double>(
+            "sc_max_radius", m_localizer_config.sc_max_radius,
+            restart_required);
+        m_localizer_config.sc_grid_resolution = this->declare_parameter<double>(
+            "sc_grid_resolution", m_localizer_config.sc_grid_resolution,
+            restart_required);
+
+        m_localizer_config.sc_dist_thresh = this->declare_parameter<double>(
+            "sc_dist_thresh", m_localizer_config.sc_dist_thresh,
+            runtime_configurable);
+        m_localizer_config.sc_similar_candidates_thresh =
+            this->declare_parameter<double>(
+                "sc_similar_candidates_thresh",
+                m_localizer_config.sc_similar_candidates_thresh,
+                runtime_configurable);
+        m_localizer_config.sc_max_candidates = this->declare_parameter<int>(
+            "sc_max_candidates", m_localizer_config.sc_max_candidates,
+            runtime_configurable);
+        m_localizer_config.sc_enable_early_exit = this->declare_parameter<bool>(
+            "sc_enable_early_exit", m_localizer_config.sc_enable_early_exit,
+            runtime_configurable);
+
+        if (m_localizer_config.sc_max_radius <= 0.0) {
+            throw std::invalid_argument("sc_max_radius must be greater than 0");
+        }
+        if (m_localizer_config.sc_grid_resolution <= 0.0) {
+            throw std::invalid_argument(
+                "sc_grid_resolution must be greater than 0");
+        }
+        if (m_localizer_config.sc_dist_thresh <= 0.0) {
+            throw std::invalid_argument("sc_dist_thresh must be greater than 0");
+        }
+        if (m_localizer_config.sc_similar_candidates_thresh < 0.0) {
+            throw std::invalid_argument(
+                "sc_similar_candidates_thresh must be non-negative");
+        }
+        if (m_localizer_config.sc_max_candidates < 1) {
+            throw std::invalid_argument(
+                "sc_max_candidates must be at least 1");
+        }
+    }
+
+    rcl_interfaces::msg::SetParametersResult onParametersSet(
+        const std::vector<rclcpp::Parameter>& parameters)
+    {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+
+        ICPConfig updated_config = m_localizer_config;
+        bool sc_config_changed = false;
+
+        for (const auto& parameter : parameters) {
+            const std::string& name = parameter.get_name();
+            if (name == "sc_dist_thresh") {
+                const double value = parameter.as_double();
+                if (value <= 0.0) {
+                    result.successful = false;
+                    result.reason = "sc_dist_thresh must be greater than 0";
+                    return result;
+                }
+                updated_config.sc_dist_thresh = value;
+                sc_config_changed = true;
+            } else if (name == "sc_similar_candidates_thresh") {
+                const double value = parameter.as_double();
+                if (value < 0.0) {
+                    result.successful = false;
+                    result.reason =
+                        "sc_similar_candidates_thresh must be non-negative";
+                    return result;
+                }
+                updated_config.sc_similar_candidates_thresh = value;
+                sc_config_changed = true;
+            } else if (name == "sc_max_candidates") {
+                const int value = parameter.as_int();
+                if (value < 1) {
+                    result.successful = false;
+                    result.reason = "sc_max_candidates must be at least 1";
+                    return result;
+                }
+                updated_config.sc_max_candidates = value;
+                sc_config_changed = true;
+            } else if (name == "sc_enable_early_exit") {
+                updated_config.sc_enable_early_exit = parameter.as_bool();
+                sc_config_changed = true;
+            }
+        }
+
+        if (sc_config_changed) {
+            m_localizer_config = updated_config;
+            if (m_localizer) {
+                m_localizer->updateConfig(m_localizer_config);
+            }
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Scan Context ROS parameters updated; changes apply to the next global relocalization");
+        }
+
+        return result;
+    }
+
     void loadParameters()
     {
         this->declare_parameter("config_path", "");
@@ -187,6 +308,7 @@ public:
         if (config_path.empty())
         {
             RCLCPP_WARN(this->get_logger(), "config_path not provided; using defaults");
+            declareScanContextParameters();
             return;
         }
 
@@ -194,6 +316,7 @@ public:
         if (!config)
         {
             RCLCPP_WARN(this->get_logger(), "FAIL TO LOAD YAML FILE!");
+            declareScanContextParameters();
             return;
         }
         RCLCPP_INFO(this->get_logger(), "LOAD FROM YAML CONFIG PATH: %s", config_path.c_str());
@@ -233,6 +356,8 @@ public:
         if (config["sc_similar_candidates_thresh"]) m_localizer_config.sc_similar_candidates_thresh = config["sc_similar_candidates_thresh"].as<double>();
         if (config["sc_max_candidates"]) m_localizer_config.sc_max_candidates = config["sc_max_candidates"].as<int>();
         if (config["sc_enable_early_exit"]) m_localizer_config.sc_enable_early_exit = config["sc_enable_early_exit"].as<bool>();
+        // YAML supplies defaults. Explicit ROS parameter overrides take precedence.
+        declareScanContextParameters();
         if (config["enable_ground_z_correction"]) m_localizer_config.enable_ground_z_correction = config["enable_ground_z_correction"].as<bool>();
         if (config["map_ground_z"]) m_localizer_config.map_ground_z = config["map_ground_z"].as<double>();
         if (config["max_ground_z_correction"]) m_localizer_config.max_ground_z_correction = config["max_ground_z_correction"].as<double>();
@@ -867,6 +992,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr m_odom_sub;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr m_initialpose_sub;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr m_global_relocalize_service;
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+        m_parameter_callback_handle;
 
     std::deque<sensor_msgs::msg::PointCloud2::SharedPtr> cloud_buf;
     std::deque<nav_msgs::msg::Odometry::SharedPtr> odom_buf;

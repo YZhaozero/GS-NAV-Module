@@ -59,6 +59,7 @@ class NavigationStackPage(QWidget):
     """Parameter editor, ordered launcher, process status and combined logs."""
 
     return_requested = pyqtSignal()
+    localization_map_selected = pyqtSignal(str)
 
     def __init__(
         self,
@@ -245,6 +246,8 @@ class NavigationStackPage(QWidget):
         self.localization_map = QLineEdit(latest_map(
             self.map_storage_dir, (".pcd",)))
         self.localization_map.setPlaceholderText("选择用于定位和生成 SC 的 PCD 地图")
+        self.localization_map.editingFinished.connect(
+            self._notify_localization_map_selected)
         selector.addRow("定位 PCD 地图", self._path_row(
             self.localization_map, self._choose_localization_map))
         self.localization_backend = QComboBox()
@@ -562,6 +565,12 @@ class NavigationStackPage(QWidget):
             "Point Cloud Map (*.pcd);;All Files (*)")
         if path:
             self.localization_map.setText(path)
+            self.localization_map_selected.emit(path)
+
+    def _notify_localization_map_selected(self) -> None:
+        path = self.localization_map.text().strip()
+        if path:
+            self.localization_map_selected.emit(path)
 
     def _choose_nav2_params(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -644,9 +653,12 @@ class NavigationStackPage(QWidget):
         )
 
     def start_stack(self) -> None:
-        success, status = self.controller.start(self.configuration())
+        config = self.configuration()
+        success, status = self.controller.start(config)
         self.action_status.setText(status)
-        if not success:
+        if success and config.localization_map:
+            self.localization_map_selected.emit(config.localization_map)
+        elif not success:
             self._append_log("system", status + "\n")
 
     def generate_scan_context(self) -> None:

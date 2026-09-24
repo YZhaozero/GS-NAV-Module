@@ -27,7 +27,11 @@ from gs_nav_app.features.mapping import (  # noqa: E402
 import gs_nav_app.features.mapping as mapping_feature  # noqa: E402
 from gs_nav_app.features.sensors import SensorPreviewRosAdapter  # noqa: E402
 from gs_nav_app.ros_launch_process import RosLaunchProcess  # noqa: E402
-from gs_nav_app.map_processing import GridMap, PointCloudMap  # noqa: E402
+from gs_nav_app.map_processing import (  # noqa: E402
+    GridMap,
+    PointCloudMap,
+    save_pcd,
+)
 from gs_nav_app.map_processing import pointcloud_to_grid  # noqa: E402
 
 
@@ -943,6 +947,42 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     assert window.map_panel.display_mode == "grid"
     window.show_navigation_setup()
     assert window.pages.currentWidget() is window.setup_page
+
+
+def test_selected_localization_pcd_is_loaded_into_ar_navigation(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    class FakeNode:
+        navigation_status = "ready"
+        camera_topic = "/camera/camera/color/image_raw"
+
+        def send_navigation_waypoints(self, waypoints):
+            return bool(waypoints)
+
+        def cancel_navigation(self):
+            pass
+
+    points = np.array([
+        [0.0, 0.0, 0.0], [1.0, 0.5, 0.2], [2.0, 1.0, 0.4],
+    ], dtype=np.float32)
+    colors = np.array([
+        [240, 20, 30], [10, 220, 40], [30, 40, 230],
+    ], dtype=np.uint8)
+    path = save_pcd(tmp_path / "localization_map.pcd", points, colors)
+    window = NavigationWindow(FakeNode())
+    window.refresh_timer.stop()
+
+    window.navigation_stack_page.localization_map.setText(str(path))
+    window.navigation_stack_page.localization_map.editingFinished.emit()
+
+    assert window.local_cloud is not None
+    assert window.local_cloud.path == path.resolve()
+    assert np.array_equal(window.map_panel._cloud_source_colors, colors)
+    assert np.array_equal(
+        window.active_page.map_panel._cloud_source_colors, colors)
+    assert window.map_panel.display_mode == "cloud"
+    assert "AR 导航已加载定位地图" in window.map_status.text()
 
 
 def test_grid_conversion_follows_auto_leveled_coordinates():

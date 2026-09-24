@@ -2166,6 +2166,8 @@ class NavigationWindow(QMainWindow):
         )
         self.navigation_stack_page.return_requested.connect(
             self.show_navigation_setup)
+        self.navigation_stack_page.localization_map_selected.connect(
+            self.load_navigation_localization_map)
         mapping_adapter = getattr(
             self.node, "mapping", UnavailableMappingRosAdapter())
         self.mapping_controller = MappingController(
@@ -3317,6 +3319,35 @@ class NavigationWindow(QMainWindow):
         self.grid_mode_button.setChecked(mode == "grid")
         self.cloud_mode_button.setChecked(mode == "cloud")
 
+    def load_navigation_localization_map(self, path: str) -> bool:
+        """Use the Localizer PCD as the AR navigation point-cloud map."""
+        raw_path = str(path).strip()
+        if not raw_path:
+            return False
+        source = FilePath(raw_path).expanduser()
+        try:
+            source = source.resolve()
+            if source.suffix.lower() not in (".pcd", ".ply"):
+                raise ValueError("定位地图必须是 PCD/PLY 点云文件")
+            current_path = (
+                self.local_cloud.path.resolve()
+                if self.local_cloud is not None
+                and self.local_cloud.path is not None else None)
+            if current_path != source:
+                cloud = load_pointcloud(source)
+                self._set_local_cloud(cloud, reset_original=True)
+            self.set_navigation_map_mode("cloud")
+            cloud = self.local_cloud
+            if cloud is not None:
+                self.map_status.setText(
+                    f"AR 导航已加载定位地图：{source.name} · "
+                    f"{len(cloud.points):,} 点 · "
+                    f"{self.map_panel.cloud_display_description()}")
+            return cloud is not None
+        except (OSError, ValueError) as exc:
+            self.map_status.setText(f"AR 导航加载定位地图失败：{exc}")
+            return False
+
     def set_editor_map_mode(self, mode: str) -> None:
         """Set map type in Map Studio without changing navigation views."""
         self.editor_map_panel.set_display_mode(mode)
@@ -3343,8 +3374,13 @@ class NavigationWindow(QMainWindow):
             color_mode=str(self.cloud_color_combo.currentData()),
         )
         self.editor_map_panel.set_cloud_display_options(**display_options)
-        self.map_panel.set_cloud_display_options(**display_options)
-        self.active_page.map_panel.set_cloud_display_options(**display_options)
+        # Map Studio may deliberately inspect height colors, but AR navigation
+        # should consistently preserve the map's RGB/intensity appearance.
+        navigation_options = dict(display_options)
+        navigation_options["color_mode"] = "rgb"
+        self.map_panel.set_cloud_display_options(**navigation_options)
+        self.active_page.map_panel.set_cloud_display_options(
+            **navigation_options)
         display_transform_active = (
             self.cloud_alignment_combo.currentData() == "auto"
             or self.cloud_axis_combo.currentData() != "XYZ"

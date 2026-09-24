@@ -413,6 +413,10 @@ class NavigationStackController(QObject):
             del self.log_events[:2000]
         self.log_received.emit(key, text)
 
+    def record_external_log(self, key: str, text: str) -> None:
+        """Add a related feature log to this page's persistent log stream."""
+        self._record_log(key, text)
+
     def _record_sensor_log(self, key: str, text: str) -> None:
         """Mirror diagnostics into the shared sensor page when supported."""
         append_log = getattr(self.sensor_controller, "append_log", None)

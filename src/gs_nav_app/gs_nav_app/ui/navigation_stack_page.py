@@ -38,6 +38,10 @@ from ..features.navigation_backends import (
     LOCALIZATION_BACKENDS,
     NAVIGATION_BACKENDS,
 )
+from ..features.localization_tools import (
+    DEFAULT_GLOBAL_RELOCALIZE_SERVICE,
+    LocalizationToolsController,
+)
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -62,12 +66,14 @@ class NavigationStackPage(QWidget):
         map_storage_dir: Path,
         lidar_arguments: Callable[[], list],
         camera_arguments: Callable[[], list],
+        localization_tools: LocalizationToolsController,
     ) -> None:
         super().__init__()
         self.controller = controller
         self.map_storage_dir = Path(map_storage_dir)
         self.lidar_arguments = lidar_arguments
         self.camera_arguments = camera_arguments
+        self.localization_tools = localization_tools
         self.component_status = {}
         self._build_ui()
         self.controller.log_received.connect(self._append_log)
@@ -75,6 +81,13 @@ class NavigationStackPage(QWidget):
             self._handle_component_state)
         self.controller.overall_state_changed.connect(
             self._handle_overall_state)
+        self.localization_tools.log_received.connect(
+            lambda text: self.controller.record_external_log(
+                "localizer", text))
+        self.localization_tools.operation_state_changed.connect(
+            self._handle_localization_operation_state)
+        self.localization_tools.status_changed.connect(
+            self._handle_localization_tool_status)
         self._handle_overall_state("stopped")
         for key in START_ORDER:
             self._handle_component_state(key, "stopped")
@@ -261,7 +274,7 @@ class NavigationStackPage(QWidget):
         layout.addWidget(self.localization_backend_description)
         self.localization_backend_stack = QStackedWidget()
         self.localization_backend_stack.addWidget(
-            self._build_pointcloud_localizer_panel())
+            self._scrollable(self._build_pointcloud_localizer_panel()))
         self.localization_backend_stack.addWidget(
             self._build_disabled_localization_panel())
         self.localization_backend_stack.addWidget(
@@ -285,6 +298,30 @@ class NavigationStackPage(QWidget):
         self.localizer_odom_topic = QLineEdit("/dlio/odom_node/odom")
         form.addRow("定位点云话题", self.localizer_cloud_topic)
         form.addRow("定位里程计话题", self.localizer_odom_topic)
+
+        sc_hint = QLabel(
+            "使用“地图”页当前选择的定位 PCD，生成同目录、同文件名的 "
+            "<地图>.pcd.sc 数据库。")
+        sc_hint.setObjectName("hint")
+        sc_hint.setWordWrap(True)
+        form.addRow("SC 地图", sc_hint)
+        self.generate_sc_button = QPushButton("生成 Scan Context 地图")
+        self.generate_sc_button.setObjectName("primaryButton")
+        self.generate_sc_button.clicked.connect(self.generate_scan_context)
+        form.addRow("离线生成", self.generate_sc_button)
+
+        self.global_relocalize_service = QLineEdit(
+            DEFAULT_GLOBAL_RELOCALIZE_SERVICE)
+        form.addRow("重定位服务", self.global_relocalize_service)
+        self.global_relocalize_button = QPushButton("触发全局重定位")
+        self.global_relocalize_button.setObjectName("primaryButton")
+        self.global_relocalize_button.clicked.connect(
+            self.trigger_global_relocalization)
+        form.addRow("在线重定位", self.global_relocalize_button)
+        self.localization_tool_status = QLabel(self.localization_tools.status)
+        self.localization_tool_status.setObjectName("statusBar")
+        self.localization_tool_status.setWordWrap(True)
+        form.addRow("", self.localization_tool_status)
         return panel
 
     @staticmethod
@@ -622,6 +659,37 @@ class NavigationStackPage(QWidget):
         self.action_status.setText(status)
         if not success:
             self._append_log("system", status + "\n")
+
+    def generate_scan_context(self) -> None:
+        success, status = self.localization_tools.generate_scan_context(
+            self.localization_map.text().strip())
+        self.localization_tool_status.setText(status)
+        if success:
+            self.parameter_tabs.setCurrentIndex(1)
+
+    def trigger_global_relocalization(self) -> None:
+        success, status = (
+            self.localization_tools.trigger_global_relocalization(
+                self.global_relocalize_service.text().strip()))
+        self.localization_tool_status.setText(status)
+        if success:
+            self.parameter_tabs.setCurrentIndex(1)
+
+    def _handle_localization_operation_state(
+        self, operation: str, state: str,
+    ) -> None:
+        busy = state in ("starting", "running")
+        if operation == "scan_context":
+            self.generate_sc_button.setEnabled(not busy)
+            self.generate_sc_button.setText(
+                "正在生成 SC 地图…" if busy else "生成 Scan Context 地图")
+        elif operation == "global_relocalize":
+            self.global_relocalize_button.setEnabled(not busy)
+            self.global_relocalize_button.setText(
+                "正在请求重定位…" if busy else "触发全局重定位")
+
+    def _handle_localization_tool_status(self, status: str) -> None:
+        self.localization_tool_status.setText(status)
 
     def activate(self) -> None:
         """Rebuild all tabs from persistent controller history."""

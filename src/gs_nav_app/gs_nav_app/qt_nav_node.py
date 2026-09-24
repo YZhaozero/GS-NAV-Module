@@ -100,6 +100,11 @@ from .features.mapping import (
     UnavailableMappingRosAdapter,
 )
 from .features.navigation_stack import NavigationStackController
+from .features.localization_tools import (
+    LocalizationRosAdapter,
+    LocalizationToolsController,
+    UnavailableLocalizationRosAdapter,
+)
 from .features.sensors import (
     SensorDriverController,
     SensorPreviewRosAdapter,
@@ -1491,6 +1496,7 @@ class QtNavRosNode(Node):
             self, NavigateThroughPoses, "/navigate_through_poses")
         self.mapping = MappingRosAdapter(self)
         self.sensor_preview = SensorPreviewRosAdapter(self)
+        self.localization_tools = LocalizationRosAdapter(self)
 
         self.latest_image: Optional[np.ndarray] = None
         self.image_revision = 0
@@ -1930,6 +1936,10 @@ class NavigationWindow(QMainWindow):
             sensor_active=self._navigation_sensor_active,
             parent=self,
         )
+        localization_adapter = getattr(
+            node, "localization_tools", UnavailableLocalizationRosAdapter())
+        self.localization_tools_controller = LocalizationToolsController(
+            localization_adapter, parent=self)
         self.sensor_preview_adapter = getattr(
             node, "sensor_preview", UnavailableSensorPreviewAdapter())
         self.sensor_state_labels = {}
@@ -2145,6 +2155,7 @@ class NavigationWindow(QMainWindow):
             self.map_storage_dir,
             self._lidar_launch_arguments,
             self._camera_launch_arguments,
+            self.localization_tools_controller,
         )
         self.navigation_stack_page.return_requested.connect(
             self.show_navigation_setup)
@@ -3981,6 +3992,7 @@ class NavigationWindow(QMainWindow):
         self.refresh_timer.stop()
         self.navigation_return_timer.stop()
         self.navigation_stack_controller.shutdown()
+        self.localization_tools_controller.shutdown()
         self.sensor_driver_controller.shutdown()
         self.mapping_controller.shutdown()
         self.sensor_preview_adapter.stop()

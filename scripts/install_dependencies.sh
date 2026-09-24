@@ -14,7 +14,8 @@ Usage: ./scripts/install_dependencies.sh [options]
 
 Install GS-NAV system and source dependencies for Ubuntu 22.04 / ROS 2 Humble.
 Source packages, build trees, and user-installed artifacts are kept outside the
-GS-NAV workspace (default: ~/gs_nav_dependencies).
+GS-NAV workspace (default: ~/gs_nav_dependencies). GTSAM 4.2 is installed as
+system packages from the official BorgLab Launchpad PPA.
 
 Options:
   --deps-root PATH  External dependency directory
@@ -127,8 +128,13 @@ for path_variable in \
 done
 
 if ((install_apt)); then
-  echo "[1/6] Installing Ubuntu and ROS dependencies..."
+  echo "[1/6] Configuring the BorgLab GTSAM 4.2 PPA..."
   sudo apt-get update
+  sudo apt-get install -y software-properties-common
+  sudo add-apt-repository -y ppa:borglab/gtsam-release-4.2
+  sudo apt-get update
+
+  echo "[1/6] Installing GTSAM, Ubuntu, and ROS dependencies..."
   sudo apt-get install -y \
     build-essential \
     cmake \
@@ -136,6 +142,8 @@ if ((install_apt)); then
     libboost-all-dev \
     libeigen3-dev \
     libfmt-dev \
+    libgtsam-dev \
+    libgtsam-unstable-dev \
     libgoogle-glog-dev \
     libopencv-dev \
     libpcl-dev \
@@ -157,14 +165,15 @@ if ((install_apt)); then
   fi
   rosdep update
 
-  # Sophus is built below. cmake_modules is a stale ROS 1 manifest dependency;
+  # Sophus is built below. GTSAM comes from the BorgLab 4.2 PPA above, rather
+  # than ros-humble-gtsam. cmake_modules is a stale ROS 1 manifest dependency;
   # the ROS 2 build keeps USE_ROS=False and uses its own FindEigen.cmake.
   source /opt/ros/humble/setup.bash
   rosdep install \
     --from-paths "${workspace_root}/src" \
     --ignore-src \
     --rosdistro humble \
-    --skip-keys "sophus cmake_modules" \
+    --skip-keys "sophus gtsam cmake_modules" \
     -r -y
 else
   echo "[1/6] Skipping apt and rosdep as requested."

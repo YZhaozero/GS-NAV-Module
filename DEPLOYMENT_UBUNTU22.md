@@ -16,19 +16,20 @@
 └── setup.bash               # 统一环境入口
 ```
 
-安装脚本只会用 `apt` 安装 Ubuntu/ROS 二进制包；从源码构建的库不会写入 `/usr/local`，也不会写入当前 GS-NAV 工作空间。
+安装脚本会用 `apt` 安装 Ubuntu/ROS 二进制包，并按项目要求添加 BorgLab 的 GTSAM 4.2 PPA。GTSAM 属于系统级安装；从源码构建的 Sophus、Livox-SDK2、TEASER++ 等库不会写入 `/usr/local`，也不会写入当前 GS-NAV 工作空间。
 
-当前验证过的原生库版本为：
+部署脚本固定或指定的关键第三方依赖为：
 
 | 依赖 | 固定版本 | 用途 |
 | --- | --- | --- |
 | Livox-SDK2 | `v1.2.5` | `livox_ros_driver2` 的硬依赖 |
 | Sophus | `1.22.10` | FAST-LIVO2 和 vikit 的硬依赖 |
 | TEASER++ | `e2f6f17` | `localizer` 全局点云配准的硬依赖 |
+| GTSAM | BorgLab PPA `4.2` | `localizer` 位姿图、iSAM2 和 SC 生成工具的硬编译依赖 |
 | Scan Context ROS 2 | 仓库内适配版本 | 外部 ROS underlay；定位数据库/兼容工具 |
 | FastGICP、NDT-OMP | 仓库内适配版本 | 独立定位算法包，当前默认 Localizer 不直接链接它们 |
 
-说明：当前 `localizer` 已在自身源码中实现 Scan Context 描述子、数据库加载和匹配，并未链接 `scancontext_ros2` 动态库。外部构建该包是为了保留完整定位工具链和后续数据库工具兼容；真正编译 `localizer` 时不可缺少的是 TEASER++。
+说明：当前 `localizer` 已在自身源码中实现 Scan Context 描述子、数据库加载和匹配，并未链接 `scancontext_ros2` 动态库。外部构建该包是为了保留完整定位工具链和后续数据库工具兼容。`localizer_node` 和 `generate_sc_tool` 都直接链接 GTSAM 与 TEASER++，因此即使运行时暂不启用位姿图，也必须在编译前安装 GTSAM。
 
 若项目用于商业交付，还应单独复核各第三方项目许可证。仓库内 Scan Context README 标注了 CC BY-NC-SA 4.0 条款，不能只因为脚本能够编译就默认满足商业使用条件。
 
@@ -40,7 +41,7 @@
 ./scripts/install_dependencies.sh
 ```
 
-脚本会调用 `sudo apt-get`、`rosdep` 和 `git`，因此需要管理员密码及可访问 Ubuntu、ROS 和 GitHub 的网络。默认使用全部 CPU 核心；Jetson 或内存较小的设备建议限制并行数：
+脚本会调用 `sudo apt-get`、`sudo add-apt-repository`、`rosdep` 和 `git`，因此需要管理员密码及可访问 Ubuntu、ROS、Launchpad 和 GitHub 的网络。默认使用全部 CPU 核心；Jetson 或内存较小的设备建议限制并行数：
 
 ```bash
 ./scripts/install_dependencies.sh --jobs 2
@@ -59,7 +60,34 @@ export GS_NAV_DEPS_ROOT="$HOME/robot_libs/gs_nav"
 ./scripts/install_dependencies.sh --skip-apt --jobs 2
 ```
 
+`--skip-apt` 会同时跳过 GTSAM PPA 配置和 GTSAM 安装，只能在已经成功安装 `libgtsam-dev`、`libgtsam-unstable-dev` 的机器上使用。
+
 脚本可重复运行。它只同步 `~/gs_nav_dependencies/ros2_ws/src` 中由本项目管理的三个包；如果指定目录已经存在但没有 `.gs_nav_dependencies` 标记，脚本会停止，避免覆盖用户文件。
+
+### 手动安装 GTSAM 4.2
+
+如果不使用一键脚本，必须先按以下顺序安装 GTSAM：
+
+```bash
+sudo apt update
+sudo apt install software-properties-common
+
+sudo add-apt-repository ppa:borglab/gtsam-release-4.2
+sudo apt update
+
+sudo apt install libgtsam-dev libgtsam-unstable-dev
+```
+
+然后确认两个开发包的来源和版本：
+
+```bash
+apt-cache policy libgtsam-dev libgtsam-unstable-dev
+dpkg-query -W 'libgtsam*'
+```
+
+候选版本应来自 `ppa.launchpadcontent.net/borglab/gtsam-release-4.2`。不要再额外安装 `ros-humble-gtsam`：项目的 `package.xml` 虽然声明了 `gtsam`，但一键脚本会让 `rosdep` 跳过该键，统一使用 BorgLab PPA 版本，避免两套 GTSAM 头文件、CMake 配置或动态库相互覆盖。
+
+GTSAM 安装到系统标准路径，CMake 会直接通过 `find_package(GTSAM REQUIRED)` 找到它，不需要把 GTSAM 路径加入 `~/gs_nav_dependencies/setup.bash`。
 
 ## 3. 一键编译工作空间
 
@@ -165,14 +193,11 @@ ros2 topic list | rg '^/camera/'
 
 无权限或设备反复断开时，优先检查 librealsense udev 规则、USB 线材、供电和 USB 带宽。多相机部署时在界面或 launch 参数中填写序列号，不要仅依赖自动发现顺序。
 
-## 6. 定位、地图和 Scan Context 配置
+## 6. 定位、地图、GTSAM 和 Scan Context 配置
 
-`src/gs_nav_localization/localizer/config/localizer.yaml` 当前包含开发机绝对路径：
+`src/gs_nav_localization/localizer/config/localizer.yaml` 当前仍在 `default_map_path` 中保存了开发机绝对路径。通过 GS-NAV 界面启动定位时，所选 PCD 会通过 `map:=...` 覆盖它，所以推荐在“导航系统 → 地图”中选择实际 PCD。
 
-- `default_map_path`；
-- `sc_database_path`。
-
-通过 GS-NAV 界面启动定位时，所选 PCD 会通过 `map:=...` 覆盖 `default_map_path`，所以推荐在“导航系统 → 地图”中选择实际 PCD。命令行启动示例：
+命令行启动示例：
 
 ```bash
 ros2 launch localizer localizer_launch.py \
@@ -181,7 +206,7 @@ ros2 launch localizer localizer_launch.py \
   odom_topic:=/dlio/odom_node/odom
 ```
 
-Scan Context 数据库路径目前不会被 launch 参数覆盖。若启用 `use_scan_context: true`，部署前必须复制配置并修改 `sc_database_path`，然后显式传入配置：
+如果需要保存本机专用的定位参数，复制 YAML 后修改 `default_map_path`、SC 阈值和采样分辨率，再显式传入配置：
 
 ```bash
 mkdir -p "$HOME/.config/gs_nav"
@@ -194,7 +219,24 @@ ros2 launch localizer localizer_launch.py \
   map:="/absolute/path/to/localization_map.pcd"
 ```
 
-数据库格式必须与当前代码一致：`poses.txt` 加 `data/000000.sc`、`data/000001.sc` 等文件；配置中的 `sc_num_rings`、`sc_num_sectors` 必须与 `.sc` 矩阵尺寸一致。当前仓库只带有 `poses.txt`，若没有对应 `data/*.sc`，日志会显示数据库加载为 0 帧，Scan Context 不会提供初始位姿，此时会回退到 TEASER++ 全局配准。
+当前版本不再从 `sc_db/poses.txt + data/*.sc` 目录加载定位数据库。启用 `use_scan_context: true` 后，Localizer 会使用与 PCD 同目录、同文件名追加 `.sc` 后缀的二进制缓存，例如：
+
+```text
+/data/maps/site_a.pcd
+/data/maps/site_a.pcd.sc
+```
+
+首次加载 PCD 时，如果缓存不存在，Localizer 会根据 `sc_grid_resolution` 和 `sc_max_radius` 自动生成并写入；若缓存读取失败，也会重新生成。地图目录必须对运行 GS-NAV 的普通用户可写，否则应提前离线生成缓存。仓库中的 `src/gs_nav_localization/localizer/sc_db/` 属于上一版格式，当前默认加载路径不会使用它。
+
+更新后的代码还提供了离线 SC 生成工具，输入 PCD 后会在同目录生成 `<地图文件>.pcd.sc`：
+
+```bash
+ros2 run localizer generate_sc_tool /absolute/path/to/localization_map.pcd
+```
+
+工具发现目标 `.sc` 已存在时会直接跳过。PCD 内容发生变化，或修改 `sc_grid_resolution`、`sc_max_radius` 等影响数据库结构的启动参数后，应先把旧 `.sc` 移走备份，再重新生成，避免地图与缓存不匹配。
+
+`generate_sc_tool` 与 `localizer_node` 共用定位源码，因此也会链接 GTSAM。当前 GTSAM 位姿图管理器采用 iSAM2，并已进入编译链路；运行时位姿图开关目前默认为关闭，且优化结果尚未直接应用到 TF，但这不影响 GTSAM 已成为必装的编译和动态链接依赖。
 
 定位还需注意：
 
@@ -230,10 +272,12 @@ ros2 pkg prefix localizer
 ros2 pkg prefix scancontext_ros2
 ros2 pkg prefix fast_livo
 
+dpkg-query -W 'libgtsam*'
 ldd install/localizer/lib/localizer/localizer_node | rg 'not found' || true
+ldd install/localizer/lib/localizer/generate_sc_tool | rg 'not found' || true
 ```
 
-`livox_ros_driver2`、`localizer`、`fast_livo` 应指向当前项目 `install`，`scancontext_ros2` 应指向 `~/gs_nav_dependencies/ros2_ws/install`。`ldd` 不应输出 `not found`。如果提示找不到 `libteaser_registration.so` 或 Livox SDK 动态库，通常是当前终端漏掉了：
+`livox_ros_driver2`、`localizer`、`fast_livo` 应指向当前项目 `install`，`scancontext_ros2` 应指向 `~/gs_nav_dependencies/ros2_ws/install`。`dpkg-query` 应列出 `libgtsam-dev` 和 `libgtsam-unstable-dev`；两次 `ldd` 均不应输出 `not found`。如果提示找不到 `libteaser_registration.so` 或 Livox SDK 动态库，通常是当前终端漏掉了：
 
 ```bash
 source "${GS_NAV_DEPS_ROOT:-$HOME/gs_nav_dependencies}/setup.bash"
@@ -244,6 +288,9 @@ source ./install/setup.bash
 
 | 现象 | 处理 |
 | --- | --- |
+| `Could not find GTSAM` / `GTSAMConfig.cmake` | 按本文添加 BorgLab 4.2 PPA并安装两个 GTSAM 开发包，然后用 `--cmake-clean-cache` 重编 |
+| `libgtsam.so` 或 `libgtsam_unstable.so` 找不到 | 用 `apt-cache policy` 检查 PPA 来源；若混装了 `ros-humble-gtsam`，先确认没有其他项目依赖它，再移除冲突版本、重装 PPA 包并运行 `sudo ldconfig` |
+| `add-apt-repository: command not found` | 先安装 `software-properties-common` |
 | `Could not find teaserpp` | 先运行依赖脚本，并确认 `CMAKE_PREFIX_PATH` 包含外部 `install` |
 | `Could not find Sophus` | 同上；不要混用系统中其他不兼容 Sophus 版本 |
 | `livox_lidar_api.h` 或 SDK 库找不到 | 检查外部 `install/include`、`install/lib`，重新加载 `setup.bash` |
@@ -254,13 +301,14 @@ source ./install/setup.bash
 ## 9. 部署检查清单
 
 - [ ] Ubuntu 22.04、ROS 2 Humble 架构与目标设备一致；
+- [ ] BorgLab GTSAM 4.2 PPA 已配置，两个 GTSAM 开发包已安装且未混装 `ros-humble-gtsam`；
 - [ ] `~/gs_nav_dependencies/setup.bash` 存在且可加载；
 - [ ] 主机网卡 IP 与 MID-360 JSON 完全一致；
 - [ ] 雷达 IP、端口、安装外参已按本车修改；
 - [ ] 真机使用 `PointCloud2` 的链路已设 `xfer_format:=4`；
 - [ ] RealSense USB、权限、序列号已验证；
 - [ ] PCD 定位地图和 Nav2 YAML/PGM 栅格地图没有混用；
-- [ ] Localizer 的 Scan Context 数据库存在，或已明确关闭 `use_scan_context`；
+- [ ] Localizer 的 `<定位地图>.pcd.sc` 与当前 PCD/SC 参数匹配，或已明确关闭 `use_scan_context`；
 - [ ] 真机 `use_sim_time=false`；
 - [ ] TF 树包含 `map -> odom -> base_link` 及传感器外参；
 - [ ] `/cmd_vel` 接口、底盘控制和急停策略已单独验证后再联调整套导航。

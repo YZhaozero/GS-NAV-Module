@@ -144,6 +144,9 @@ class CameraPanel(QWidget):
         self._frame_revision: Optional[int] = None
         self._source_size = (1280, 720)
         self._route = None
+        self._route_geometry_key = None
+        self._route_fill_path = QPainterPath()
+        self._route_center_path = QPainterPath()
         self._distance = 0.0
         self._camera_live = False
 
@@ -173,6 +176,8 @@ class CameraPanel(QWidget):
             self._source_size = (w, h)
             self._camera_live = True
             self._frame_revision = frame_revision
+        if route is not self._route:
+            self._route_geometry_key = None
         self._route = route
         self._distance = remaining_m
         self.update()
@@ -183,6 +188,9 @@ class CameraPanel(QWidget):
         self._pixmap = None
         self._frame_revision = None
         self._route = None
+        self._route_geometry_key = None
+        self._route_fill_path = QPainterPath()
+        self._route_center_path = QPainterPath()
         self._camera_live = False
         self.update()
 
@@ -255,19 +263,113 @@ class CameraPanel(QWidget):
         )
 
     def _draw_route(self, painter: QPainter, target: QRectF) -> None:
+        self._ensure_route_geometry(target)
+        if self._route_fill_path.isEmpty():
+            return
+        outline = QPen(QColor(70, 220, 255, 230), 2.0)
+        outline.setCapStyle(Qt.RoundCap)
+        outline.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(outline)
+        painter.setBrush(QColor(0, 150, 230, 118))
+        painter.drawPath(self._route_fill_path)
+        center_pen = QPen(QColor(146, 238, 255, 220), 1.2)
+        center_pen.setCapStyle(Qt.RoundCap)
+        center_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(center_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(self._route_center_path)
+
+    @staticmethod
+    def _sample_route_run(center: np.ndarray, start: int, stop: int) -> np.ndarray:
+        """Keep enough screen-space points for curves without drawing thousands."""
+        count = stop - start
+        if count <= 2:
+            return np.arange(start, stop, dtype=np.int64)
+        selected = [start]
+        last = center[start]
+        for index in range(start + 1, stop - 1):
+            if float(np.linalg.norm(center[index] - last)) >= 2.5:
+                selected.append(index)
+                last = center[index]
+        selected.append(stop - 1)
+        if len(selected) > 240:
+            positions = np.linspace(
+                0, len(selected) - 1, 240, dtype=np.int64)
+            selected = [selected[index] for index in positions]
+        return np.asarray(selected, dtype=np.int64)
+
+    def _ensure_route_geometry(self, target: QRectF) -> None:
+        key = (
+            id(self._route),
+            round(target.left(), 2), round(target.top(), 2),
+            round(target.width(), 2), round(target.height(), 2),
+            self._source_size,
+        )
+        if key == self._route_geometry_key:
+            return
+        self._route_geometry_key = key
+        self._route_fill_path = QPainterPath()
+        self._route_center_path = QPainterPath()
+        if self._route is None:
+            return
         center, left, right, valid = self._route
-        painter.setPen(QPen(QColor(74, 222, 255, 225), 2.0))
-        painter.setBrush(QColor(0, 150, 230, 112))
-        for index in range(len(center) - 1):
-            if not (valid[index] and valid[index + 1]):
+        center = np.asarray(center, dtype=np.float32)
+        left = np.asarray(left, dtype=np.float32)
+        right = np.asarray(right, dtype=np.float32)
+        valid = np.asarray(valid, dtype=bool).reshape(-1)
+        if len(center) < 2 or not (
+            len(center) == len(left) == len(right) == len(valid)
+        ):
+            return
+        finite = (
+            np.all(np.isfinite(center), axis=1)
+            & np.all(np.isfinite(left), axis=1)
+            & np.all(np.isfinite(right), axis=1)
+        )
+        valid &= finite
+        source_w, source_h = self._source_size
+        scale = np.array([
+            target.width() / max(source_w, 1),
+            target.height() / max(source_h, 1),
+        ], dtype=np.float32)
+        offset = np.array([target.left(), target.top()], dtype=np.float32)
+        mapped_center = center[:, :2] * scale + offset
+        mapped_left = left[:, :2] * scale + offset
+        mapped_right = right[:, :2] * scale + offset
+        # Near-camera projection can produce very large off-screen values.
+        # Bound them before handing the path to Qt's rasterizer.
+        x_bounds = (
+            target.left() - target.width(),
+            target.right() + target.width(),
+        )
+        y_bounds = (
+            target.top() - target.height(),
+            target.bottom() + target.height(),
+        )
+        for mapped in (mapped_center, mapped_left, mapped_right):
+            mapped[:, 0] = np.clip(mapped[:, 0], *x_bounds)
+            mapped[:, 1] = np.clip(mapped[:, 1], *y_bounds)
+
+        padded = np.concatenate(([False], valid, [False]))
+        changes = np.flatnonzero(padded[1:] != padded[:-1])
+        for start, stop in zip(changes[::2], changes[1::2]):
+            if stop - start < 2:
                 continue
-            polygon = QPolygonF([
-                self._map_video_point(left[index], target),
-                self._map_video_point(left[index + 1], target),
-                self._map_video_point(right[index + 1], target),
-                self._map_video_point(right[index], target),
-            ])
-            painter.drawPolygon(polygon)
+            indices = self._sample_route_run(mapped_center, start, stop)
+            first = mapped_left[indices[0]]
+            self._route_fill_path.moveTo(float(first[0]), float(first[1]))
+            for point in mapped_left[indices[1:]]:
+                self._route_fill_path.lineTo(float(point[0]), float(point[1]))
+            for point in mapped_right[indices[::-1]]:
+                self._route_fill_path.lineTo(float(point[0]), float(point[1]))
+            self._route_fill_path.closeSubpath()
+
+            center_first = mapped_center[indices[0]]
+            self._route_center_path.moveTo(
+                float(center_first[0]), float(center_first[1]))
+            for point in mapped_center[indices[1:]]:
+                self._route_center_path.lineTo(
+                    float(point[0]), float(point[1]))
 
     def _draw_status(self, painter: QPainter, target: QRectF) -> None:
         compact = target.width() < 320 or target.height() < 180
@@ -1514,6 +1616,8 @@ class QtNavRosNode(Node):
         self.path_frame = self.map_frame
         self.active_path_topic = ""
         self.path_message_count = 0
+        self._route_ribbon_key = None
+        self._route_ribbon = None
         self.occupancy: Optional[np.ndarray] = None
         self.grid_frame = self.map_frame
         self.map_origin = np.zeros(2, dtype=np.float32)
@@ -1594,6 +1698,7 @@ class QtNavRosNode(Node):
         self.active_path_topic = source_topic
         self.path_message_count = int(getattr(
             self, "path_message_count", 0)) + 1
+        self._route_ribbon_key = None
         if topic_changed and hasattr(self, "get_logger"):
             self.get_logger().info(
                 f"Navigation path received from {source_topic}: "
@@ -1637,7 +1742,17 @@ class QtNavRosNode(Node):
     def projected_route(self, image_shape):
         if len(self.path) < 2:
             return None
-        left, right = make_ribbon(self.path, self.style.ribbon_width_m)
+        ribbon_key = (
+            id(self.path), len(self.path), float(self.style.ribbon_width_m))
+        if self._route_ribbon_key != ribbon_key or self._route_ribbon is None:
+            left, right = make_ribbon(
+                self.path, self.style.ribbon_width_m)
+            self._route_ribbon = (left, right)
+            self._route_ribbon_key = ribbon_key
+        else:
+            left, right = self._route_ribbon
+        point_count = len(self.path)
+        combined = np.vstack((self.path, left, right))
         if (
             self.projection_mode in ("auto", "calibrated")
             and self.camera_matrix is not None
@@ -1649,12 +1764,12 @@ class QtNavRosNode(Node):
                 if self.camera_info_size:
                     k[0, :] *= image_shape[1] / max(self.camera_info_size[0], 1)
                     k[1, :] *= image_shape[0] / max(self.camera_info_size[1], 1)
-                center_px, center_valid = project_optical(
-                    apply_transform(self.path, matrix), k)
-                left_px, left_valid = project_optical(
-                    apply_transform(left, matrix), k)
-                right_px, right_valid = project_optical(
-                    apply_transform(right, matrix), k)
+                pixels, projected_valid = project_optical(
+                    apply_transform(combined, matrix), k)
+                center_px, left_px, right_px = np.split(
+                    pixels, (point_count, point_count * 2))
+                center_valid, left_valid, right_valid = np.split(
+                    projected_valid, (point_count, point_count * 2))
                 valid = center_valid & left_valid & right_valid
                 if len(valid) >= 2 and np.any(valid[:-1] & valid[1:]):
                     return center_px, left_px, right_px, valid
@@ -1663,12 +1778,12 @@ class QtNavRosNode(Node):
         matrix = self.lookup_matrix(self.base_frame, self.path_frame)
         if matrix is None:
             return None
-        center_px, center_valid = project_ground(
-            apply_transform(self.path, matrix), image_shape, self.style)
-        left_px, left_valid = project_ground(
-            apply_transform(left, matrix), image_shape, self.style)
-        right_px, right_valid = project_ground(
-            apply_transform(right, matrix), image_shape, self.style)
+        pixels, projected_valid = project_ground(
+            apply_transform(combined, matrix), image_shape, self.style)
+        center_px, left_px, right_px = np.split(
+            pixels, (point_count, point_count * 2))
+        center_valid, left_valid, right_valid = np.split(
+            projected_valid, (point_count, point_count * 2))
         valid = center_valid & left_valid & right_valid
         if len(valid) >= 2 and np.any(valid[:-1] & valid[1:]):
             return center_px, left_px, right_px, valid
@@ -1699,6 +1814,8 @@ class QtNavRosNode(Node):
 
     def clear_navigation_path(self) -> None:
         self.path = np.empty((0, 3), dtype=np.float32)
+        self._route_ribbon_key = None
+        self._route_ribbon = None
         self.path_frame = self.map_frame
         self.active_path_topic = ""
 

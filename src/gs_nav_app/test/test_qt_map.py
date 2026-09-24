@@ -163,6 +163,29 @@ def test_camera_panel_converts_each_ros_frame_only_once():
     assert panel._pixmap.cacheKey() != first_key
 
 
+def test_camera_route_is_one_cached_smooth_path_not_per_segment_blocks():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    panel = CameraPanel(fill=True)
+    panel.resize(800, 480)
+    count = 4000
+    x = np.linspace(40.0, 600.0, count, dtype=np.float32)
+    y = 300.0 + 40.0 * np.sin(x / 80.0)
+    center = np.column_stack((x, y)).astype(np.float32)
+    left = center + np.array([0.0, -24.0], dtype=np.float32)
+    right = center + np.array([0.0, 24.0], dtype=np.float32)
+    route = (center, left, right, np.ones(count, dtype=bool))
+    panel.set_frame(None, route, 12.0)
+    panel._ensure_route_geometry(panel._video_rect())
+
+    assert not panel._route_fill_path.isEmpty()
+    assert panel._route_fill_path.elementCount() < 600
+    assert panel._route_center_path.elementCount() < 300
+    cached_fill = panel._route_fill_path
+    panel._ensure_route_geometry(panel._video_rect())
+    assert panel._route_fill_path is cached_fill
+
+
 def test_pointcloud_view_coordinate_round_trip():
     app = QApplication.instance() or QApplication([])
     assert app is not None

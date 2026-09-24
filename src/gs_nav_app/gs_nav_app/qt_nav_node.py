@@ -337,6 +337,7 @@ class MapPanel(QWidget):
         self._cloud_3d_enabled = bool(cloud_3d)
         self._cloud_source_points = np.empty((0, 3), dtype=np.float32)
         self._cloud_source_colors: Optional[np.ndarray] = None
+        self._cloud_source_color_source = ""
         self._cloud_source_splat_scales: Optional[np.ndarray] = None
         self._cloud_source_splat_rotations: Optional[np.ndarray] = None
         self._cloud_source_splat_opacities: Optional[np.ndarray] = None
@@ -460,11 +461,13 @@ class MapPanel(QWidget):
         splat_scales: Optional[np.ndarray] = None,
         splat_rotations: Optional[np.ndarray] = None,
         splat_opacities: Optional[np.ndarray] = None,
+        color_source: str = "",
     ) -> None:
         if points is None or not len(points):
             self._cloud_pixmap = None
             self._cloud_source_points = np.empty((0, 3), dtype=np.float32)
             self._cloud_source_colors = None
+            self._cloud_source_color_source = ""
             self._cloud_source_splat_scales = None
             self._cloud_source_splat_rotations = None
             self._cloud_source_splat_opacities = None
@@ -480,6 +483,7 @@ class MapPanel(QWidget):
             self._cloud_pixmap = None
             self._cloud_source_points = np.empty((0, 3), dtype=np.float32)
             self._cloud_source_colors = None
+            self._cloud_source_color_source = ""
             self._cloud_source_splat_scales = None
             self._cloud_source_splat_rotations = None
             self._cloud_source_splat_opacities = None
@@ -533,6 +537,8 @@ class MapPanel(QWidget):
         self._cloud_source_colors = (
             None if source_colors is None
             else np.ascontiguousarray(source_colors[sample_indices]))
+        self._cloud_source_color_source = (
+            str(color_source) if self._cloud_source_colors is not None else "")
         if is_splat:
             self._cloud_source_splat_scales = np.ascontiguousarray(
                 source_scales[sample_indices])
@@ -691,9 +697,10 @@ class MapPanel(QWidget):
             if self._cloud_alignment == "auto" else "原始坐标")
         projection = "透视" if self._cloud_projection == "perspective" else "正交"
         if self._cloud_color_mode == "rgb" and self.cloud_has_rgb:
-            color = (
-                "GS 基础颜色" if self._cloud_source_splat_scales is not None
-                else "原始 RGB")
+            color = {
+                "intensity": "原始强度",
+                "gaussian": "GS 基础颜色",
+            }.get(self._cloud_source_color_source, "原始 RGB")
         else:
             color = "高度着色"
         flips = [
@@ -3454,6 +3461,7 @@ class NavigationWindow(QMainWindow):
             cloud.splat_scales,
             cloud.splat_rotations,
             cloud.splat_opacities,
+            cloud.color_source,
         )
 
     def _set_local_cloud(

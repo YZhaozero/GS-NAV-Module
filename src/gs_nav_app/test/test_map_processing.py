@@ -43,6 +43,24 @@ def test_binary_pcd_rgb_round_trip(tmp_path: Path):
     assert np.array_equal(loaded.colors, colors)
 
 
+def test_pcd_intensity_is_preserved_as_source_grayscale(tmp_path: Path):
+    path = tmp_path / "intensity_map.pcd"
+    path.write_text(
+        "# .PCD v0.7\nVERSION 0.7\n"
+        "FIELDS x y z intensity\n"
+        "SIZE 4 4 4 4\nTYPE F F F F\nCOUNT 1 1 1 1\n"
+        "WIDTH 3\nHEIGHT 1\nPOINTS 3\nDATA ascii\n"
+        "0 0 0 0\n1 0 0 50\n2 0 0 100\n",
+        encoding="ascii",
+    )
+    loaded = load_pcd(path)
+    assert loaded.color_source == "intensity"
+    assert loaded.colors.shape == (3, 3)
+    assert np.all(loaded.colors[:, 0] == loaded.colors[:, 1])
+    assert np.all(loaded.colors[:, 1] == loaded.colors[:, 2])
+    assert np.all(np.diff(loaded.colors[:, 0].astype(np.int16)) > 0)
+
+
 def test_ascii_ply_load_rgb_and_convert_to_grid(tmp_path: Path):
     path = tmp_path / "colored_ascii.ply"
     path.write_text(

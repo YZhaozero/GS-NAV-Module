@@ -129,7 +129,6 @@ class NavigationStackPage(QWidget):
         parameters_title.setObjectName("sectionTitle")
         controls_layout.addWidget(parameters_title)
         self.parameter_tabs = QTabWidget()
-        self.parameter_tabs.addTab(self._build_map_tab(), "地图")
         self.parameter_tabs.addTab(self._build_localization_tab(), "定位")
         self.parameter_tabs.addTab(self._build_navigation_tab(), "导航")
         self.parameter_tabs.addTab(self._build_dlio_tab(), "DLIO")
@@ -237,32 +236,17 @@ class NavigationStackPage(QWidget):
             if label.objectName() == "subtitle":
                 label.setVisible(not compact)
 
-    def _build_map_tab(self) -> QWidget:
-        tab = QWidget()
-        form = QFormLayout(tab)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.navigation_map = QLineEdit(latest_map(
-            self.map_storage_dir, (".yaml", ".yml")))
-        form.addRow("导航地图", self._path_row(
-            self.navigation_map, self._choose_navigation_map))
-        self.localization_map = QLineEdit(latest_map(
-            self.map_storage_dir, (".pcd",)))
-        form.addRow("定位地图", self._path_row(
-            self.localization_map, self._choose_localization_map))
-        hint = QLabel(
-            "地图只作为独立资源配置：Nav2 使用 YAML 栅格地图，当前点云 "
-            "Localizer 使用 PCD；不需要地图的后端会忽略对应文件。")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        form.addRow("", hint)
-        return tab
-
     def _build_localization_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
         selector = QFormLayout()
         selector.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.localization_map = QLineEdit(latest_map(
+            self.map_storage_dir, (".pcd",)))
+        self.localization_map.setPlaceholderText("选择用于定位和生成 SC 的 PCD 地图")
+        selector.addRow("定位 PCD 地图", self._path_row(
+            self.localization_map, self._choose_localization_map))
         self.localization_backend = QComboBox()
         for key, backend in LOCALIZATION_BACKENDS.items():
             self.localization_backend.addItem(backend.label, key)
@@ -300,7 +284,7 @@ class NavigationStackPage(QWidget):
         form.addRow("定位里程计话题", self.localizer_odom_topic)
 
         sc_hint = QLabel(
-            "使用“地图”页当前选择的定位 PCD，生成同目录、同文件名的 "
+            "使用本页上方选择的定位 PCD，生成同目录、同文件名的 "
             "<地图>.pcd.sc 数据库。")
         sc_hint.setObjectName("hint")
         sc_hint.setWordWrap(True)
@@ -360,6 +344,11 @@ class NavigationStackPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         selector = QFormLayout()
         selector.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.navigation_map = QLineEdit(latest_map(
+            self.map_storage_dir, (".yaml", ".yml")))
+        self.navigation_map.setPlaceholderText("选择 Nav2 使用的 YAML 栅格地图")
+        selector.addRow("导航 YAML 地图", self._path_row(
+            self.navigation_map, self._choose_navigation_map))
         self.navigation_backend = QComboBox()
         for key, backend in NAVIGATION_BACKENDS.items():
             self.navigation_backend.addItem(backend.label, key)
@@ -563,14 +552,14 @@ class NavigationStackPage(QWidget):
     def _choose_navigation_map(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择导航地图", str(self.map_storage_dir),
-            "Map Files (*.yaml *.yml *.pcd *.ply *.pgm);;All Files (*)")
+            "Nav2 Map (*.yaml *.yml);;All Files (*)")
         if path:
             self.navigation_map.setText(path)
 
     def _choose_localization_map(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择定位地图", str(self.map_storage_dir),
-            "Map Files (*.pcd *.ply *.yaml *.yml *.pgm);;All Files (*)")
+            "Point Cloud Map (*.pcd);;All Files (*)")
         if path:
             self.localization_map.setText(path)
 
@@ -661,19 +650,15 @@ class NavigationStackPage(QWidget):
             self._append_log("system", status + "\n")
 
     def generate_scan_context(self) -> None:
-        success, status = self.localization_tools.generate_scan_context(
+        _success, status = self.localization_tools.generate_scan_context(
             self.localization_map.text().strip())
         self.localization_tool_status.setText(status)
-        if success:
-            self.parameter_tabs.setCurrentIndex(1)
 
     def trigger_global_relocalization(self) -> None:
-        success, status = (
+        _success, status = (
             self.localization_tools.trigger_global_relocalization(
                 self.global_relocalize_service.text().strip()))
         self.localization_tool_status.setText(status)
-        if success:
-            self.parameter_tabs.setCurrentIndex(1)
 
     def _handle_localization_operation_state(
         self, operation: str, state: str,

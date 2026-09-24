@@ -177,6 +177,22 @@ def test_pointcloud_view_coordinate_round_trip():
     assert np.allclose(recovered, world, atol=0.03)
 
 
+def test_ar_cloud_uses_source_intensity_colors_instead_of_height():
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    panel = MapPanel(cloud_3d=True)
+    points = np.array([
+        [0.0, 0.0, 0.0], [1.0, 0.0, 2.0], [2.0, 0.0, 1.0],
+    ], dtype=np.float32)
+    source_colors = np.array([
+        [30, 30, 30], [220, 220, 220], [120, 120, 120],
+    ], dtype=np.uint8)
+    panel.set_pointcloud(
+        points, colors=source_colors, color_source="intensity")
+    assert np.array_equal(panel._cloud_colors, source_colors)
+    assert "原始强度" in panel.cloud_display_description()
+
+
 def test_map_studio_cloud_has_independent_3d_camera_controls():
     app = QApplication.instance() or QApplication([])
     assert app is not None
@@ -891,7 +907,11 @@ def test_navigation_and_map_processing_are_separate_workspaces():
     assert [
         window.navigation_stack_page.parameter_tabs.tabText(index)
         for index in range(window.navigation_stack_page.parameter_tabs.count())
-    ] == ["地图", "定位", "导航", "DLIO", "LaserScan", "通用"]
+    ] == ["定位", "导航", "DLIO", "LaserScan", "通用"]
+    assert window.navigation_stack_page.parameter_tabs.widget(0).isAncestorOf(
+        window.navigation_stack_page.localization_map)
+    assert window.navigation_stack_page.parameter_tabs.widget(1).isAncestorOf(
+        window.navigation_stack_page.navigation_map)
     assert window.navigation_stack_page.localization_backend.currentData() == (
         "pointcloud_localizer")
     assert window.navigation_stack_page.navigation_backend.currentData() == "nav2"

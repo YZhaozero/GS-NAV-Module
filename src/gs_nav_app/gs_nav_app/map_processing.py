@@ -25,6 +25,7 @@ class PointCloudMap:
     path: Optional[Path] = None
     frame_id: str = "map"
     colors: Optional[np.ndarray] = None
+    color_source: str = ""
     splat_scales: Optional[np.ndarray] = None
     splat_rotations: Optional[np.ndarray] = None
     splat_opacities: Optional[np.ndarray] = None
@@ -39,6 +40,10 @@ class PointCloudMap:
             if colors.ndim != 2 or colors.shape != (len(points), 3):
                 raise ValueError("点云颜色必须是与点数量一致的 N×3 数组")
             self.colors = np.ascontiguousarray(colors)
+            if not self.color_source:
+                self.color_source = "rgb"
+        elif self.color_source:
+            self.color_source = ""
         for name, width in (("splat_scales", 3), ("splat_rotations", 4)):
             value = getattr(self, name)
             if value is not None:
@@ -189,7 +194,32 @@ def _colors_from_columns(columns: Dict[str, np.ndarray]) -> Optional[np.ndarray]
         return np.ascontiguousarray(np.column_stack([
             np.asarray(names[axis]).reshape(-1) for axis in ("r", "g", "b")
         ]).astype(np.uint8))
+    if "intensity" in names:
+        intensity = np.asarray(names["intensity"], dtype=np.float64).reshape(-1)
+        finite = np.isfinite(intensity)
+        if not np.any(finite):
+            return None
+        low, high = np.percentile(intensity[finite], [2.0, 98.0])
+        if high - low < 1e-9:
+            grayscale = np.full(len(intensity), 210, dtype=np.uint8)
+        else:
+            normalized = np.zeros(len(intensity), dtype=np.float64)
+            normalized[finite] = np.clip(
+                (intensity[finite] - low) / (high - low), 0.0, 1.0)
+            grayscale = np.clip(
+                np.rint(35.0 + normalized * 220.0), 0, 255).astype(np.uint8)
+            grayscale[~finite] = 35
+        return np.ascontiguousarray(np.repeat(grayscale[:, None], 3, axis=1))
     return None
+
+
+def _pcd_color_source(columns: Dict[str, np.ndarray]) -> str:
+    names = {name.lower() for name in columns}
+    if "rgb" in names or "rgba" in names or {"r", "g", "b"} <= names:
+        return "rgb"
+    if "intensity" in names:
+        return "intensity"
+    return ""
 
 
 def _lzf_decompress(data: bytes, expected_size: int) -> bytes:
@@ -245,6 +275,7 @@ def load_pcd(path: str | Path) -> PointCloudMap:
             field_arrays[name.lower()] = raw_values.astype(dtype, copy=False)
             column += count
         colors = _colors_from_columns(field_arrays)
+        color_source = _pcd_color_source(field_arrays)
     elif encoding == "binary":
         names = []
         for name, dtype, count in layout:
@@ -254,9 +285,11 @@ def load_pcd(path: str | Path) -> PointCloudMap:
             records[next(name for name in records.dtype.names if name.lower() == axis)]
             for axis in ("x", "y", "z")
         ])
-        colors = _colors_from_columns({
+        field_arrays = {
             name.lower(): records[name] for name in records.dtype.names
-        })
+        }
+        colors = _colors_from_columns(field_arrays)
+        color_source = _pcd_color_source(field_arrays)
     elif encoding == "binary_compressed":
         if len(payload) < 8:
             raise ValueError("PCD 压缩数据头不完整")
@@ -275,6 +308,7 @@ def load_pcd(path: str | Path) -> PointCloudMap:
         except KeyError as exc:
             raise ValueError("PCD 文件必须包含 x、y、z 字段") from exc
         colors = _colors_from_columns(field_arrays)
+        color_source = _pcd_color_source(field_arrays)
     else:
         raise ValueError(f"不支持的 PCD DATA 类型: {encoding}")
 
@@ -285,7 +319,8 @@ def load_pcd(path: str | Path) -> PointCloudMap:
         colors = colors[valid]
     if point_count and not len(points):
         raise ValueError("PCD 中没有有效的 XYZ 点")
-    return PointCloudMap(points=points, path=path, colors=colors)
+    return PointCloudMap(
+        points=points, path=path, colors=colors, color_source=color_source)
 
 
 def _read_ply_header(stream):
@@ -358,6 +393,17 @@ def _ply_colors(columns: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
     return np.ascontiguousarray(np.clip(np.rint(colors), 0, 255).astype(np.uint8))
 
 
+def _ply_color_source(columns: Dict[str, np.ndarray]) -> str:
+    if all(f"f_dc_{index}" in columns for index in range(3)):
+        return "gaussian"
+    aliases = (
+        ("red", "green", "blue"),
+        ("r", "g", "b"),
+        ("diffuse_red", "diffuse_green", "diffuse_blue"),
+    )
+    return "rgb" if any(all(key in columns for key in group) for group in aliases) else ""
+
+
 def _ply_gaussian_attributes(columns: Dict[str, np.ndarray]):
     required = [
         "opacity", "scale_0", "scale_1", "scale_2",
@@ -428,6 +474,7 @@ def load_ply(path: str | Path) -> PointCloudMap:
         points=points,
         path=path,
         colors=colors,
+        color_source=_ply_color_source(columns),
         splat_scales=splat_scales,
         splat_rotations=splat_rotations,
         splat_opacities=splat_opacities,
